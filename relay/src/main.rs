@@ -2,8 +2,9 @@ mod api;
 mod auth;
 mod config;
 mod db;
+mod oidc;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{
     routing::{get, post},
@@ -11,8 +12,10 @@ use axum::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use auth::AppState;
 use config::Config;
 use db::RelayDb;
+use oidc::OidcClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,10 +28,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
-    tracing::info!(bind = %config.bind, public_url = %config.public_url, "starting todo-relay");
+    tracing::info!(
+        bind = %config.bind,
+        public_url = %config.public_url,
+        oidc_issuer = %config.oidc_issuer,
+        "starting todo-relay"
+    );
+
+    // OIDC discovery — fails fast if the provider is unreachable
+    let oidc = OidcClient::discover(
+        &config.oidc_issuer,
+        &config.oidc_client_id,
+        &config.oidc_client_secret,
+        &config.redirect_uri(),
+    )
+    .await?;
+    tracing::info!("OIDC discovery complete");
 
     let relay_db = RelayDb::open(&config.database_path)?;
-    let shared_db = Arc::new(Mutex::new(relay_db));
+
+    let state = AppState {
+        db: Arc::new(std::sync::Mutex::new(relay_db)),
+        oidc: Arc::new(oidc),
+        config: Arc::new(config.clone()),
+        pending_logins: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    };
 
     // Public routes — no auth required
     let public = Router::new()
@@ -36,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/auth/login", get(api::auth_login))
         .route("/auth/callback", get(api::auth_callback))
         .route("/auth/logout", post(api::logout))
-        .with_state(shared_db.clone());
+        .with_state(state.clone());
 
     // Protected routes — Bearer token required
     let protected = Router::new()
@@ -44,10 +68,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/pull", get(api::pull))
         .route("/me", get(api::me))
         .layer(axum::middleware::from_fn_with_state(
-            shared_db.clone(),
+            state.clone(),
             auth::require_auth,
         ))
-        .with_state(shared_db);
+        .with_state(state.clone());
 
     let app = public.merge(protected);
 

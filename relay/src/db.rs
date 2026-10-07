@@ -248,13 +248,10 @@ impl RelayDb {
 }
 
 fn hash_token(token: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // Note: SHA-256 would be better; this is a placeholder for the restructure phase.
-    // We'll use a proper hash in the auth implementation phase.
-    let mut hasher = DefaultHasher::new();
-    token.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {

@@ -1,7 +1,9 @@
-//! OIDC authentication flow and session middleware.
-//!
-//! Implemented in the auth phase. For now, this module provides
-//! the session extraction middleware so api.rs compiles.
+//! Authentication: session middleware and login state management.
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     extract::{Request, State},
@@ -9,9 +11,30 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use openidconnect::{CsrfToken, Nonce};
 use uuid::Uuid;
 
-use crate::db::RelayDb;
+use crate::{db::RelayDb, oidc::OidcClient};
+
+/// Shared application state, cloned into every request.
+#[derive(Clone)]
+pub struct AppState {
+    pub db: Arc<Mutex<RelayDb>>,
+    pub oidc: Arc<OidcClient>,
+    pub config: Arc<crate::config::Config>,
+    /// Pending login flows: state → (csrf_token, nonce, cli_callback_url)
+    pub pending_logins: Arc<Mutex<HashMap<String, PendingLogin>>>,
+}
+
+/// A login flow in progress, waiting for the OIDC callback.
+#[derive(Debug, Clone)]
+pub struct PendingLogin {
+    pub csrf_token: CsrfToken,
+    pub nonce: Nonce,
+    /// Where to send the session token after successful login
+    /// (the CLI's loopback URL, e.g. http://127.0.0.1:54321/callback)
+    pub cli_callback: String,
+}
 
 /// Extracted from the `Authorization: Bearer <token>` header.
 #[derive(Debug, Clone)]
@@ -22,7 +45,7 @@ pub struct AuthSession {
 /// Middleware: validate Bearer token, insert AuthSession into request extensions.
 /// Returns 401 if missing or invalid.
 pub async fn require_auth(
-    State(db): State<std::sync::Arc<std::sync::Mutex<RelayDb>>>,
+    State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -33,17 +56,19 @@ pub async fn require_auth(
         .unwrap_or("");
 
     let Some(token) = auth_header.strip_prefix("Bearer ") else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
 
     let user_id = {
-        let db = match db.lock() {
+        let db = match state.db.lock() {
             Ok(db) => db,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
         match db.validate_session(token) {
             Ok(Some(uid)) => uid,
-            Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+            Ok(None) => {
+                return (StatusCode::UNAUTHORIZED, "invalid or expired session").into_response();
+            }
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     };
