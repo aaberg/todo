@@ -37,6 +37,10 @@ pub enum Commands {
     Done { id: i64 },
     /// Mark a todo as not done
     Undone { id: i64 },
+    /// Permanently delete a todo
+    Remove { id: i64 },
+    /// Show the event history for a todo
+    Log { id: i64 },
     /// Permanently delete all completed todos
     Prune,
 }
