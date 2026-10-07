@@ -1,0 +1,16 @@
+[package]
+name = "todo-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+todo-common = { path = "../common" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

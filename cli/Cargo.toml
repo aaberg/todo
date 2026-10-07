@@ -1,0 +1,13 @@
+[package]
+name = "todo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+todo-common = { path = "../common" }
+chrono = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

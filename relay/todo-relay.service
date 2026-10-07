@@ -1,0 +1,23 @@
+[Unit]
+Description=Todo Sync Relay
+After=network.target
+
+[Service]
+Type=simple
+User=todo-relay
+Group=todo-relay
+WorkingDirectory=/var/lib/todo-relay
+EnvironmentFile=/etc/todo-relay/env
+ExecStart=/usr/local/bin/todo-relay
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/todo-relay
+
+[Install]
+WantedBy=multi-user.target

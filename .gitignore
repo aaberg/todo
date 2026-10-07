@@ -1,2 +1,11 @@
 /target
 /.idea
+
+# Relay runtime artifacts
+*.db
+*.db-wal
+*.db-shm
+relay/.env
+
+# OS
+.DS_Store
