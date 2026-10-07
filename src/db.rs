@@ -424,4 +424,368 @@ mod tests {
         db.set_state("key", "updated").unwrap();
         assert_eq!(db.get_state("key").unwrap(), Some("updated".to_owned()));
     }
+
+    // ─── Convergence tests: two-machine sync simulation ───
+
+    fn make_event(
+        device: Uuid,
+        todo: Uuid,
+        event_type: EventType,
+        payload: EventPayload,
+        ts: &str,
+    ) -> Event {
+        let mut event = Event::new(device, todo, event_type, payload);
+        event.timestamp = DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc);
+        event
+    }
+
+    /// Simulate a sync: push all of B's events to A and vice versa.
+    /// Dedup is handled by INSERT OR IGNORE on event_id.
+    fn exchange_events(a: &mut Database, b: &mut Database) {
+        let a_events = a.all_events().unwrap();
+        let b_events = b.all_events().unwrap();
+        for event in &b_events {
+            a.append_event(event).unwrap();
+        }
+        for event in &a_events {
+            b.append_event(event).unwrap();
+        }
+    }
+
+    fn folded_state(db: &Database) -> Vec<crate::model::Todo> {
+        let events = db.all_events().unwrap();
+        fold_events(&events)
+    }
+
+    #[test]
+    fn convergence_independent_creates() {
+        let mut a = test_database();
+        let mut b = test_database();
+
+        // Machine A creates a todo
+        let todo_x = Uuid::new_v4();
+        a.append_event(&make_event(
+            a.device_id().unwrap(),
+            todo_x,
+            EventType::Create,
+            EventPayload::Create {
+                description: "From A".to_owned(),
+                due_date: date("2026-10-08"),
+            },
+            "2026-10-07T10:00:00Z",
+        ))
+        .unwrap();
+
+        // Machine B creates a different todo
+        let todo_y = Uuid::new_v4();
+        b.append_event(&make_event(
+            b.device_id().unwrap(),
+            todo_y,
+            EventType::Create,
+            EventPayload::Create {
+                description: "From B".to_owned(),
+                due_date: date("2026-10-09"),
+            },
+            "2026-10-07T11:00:00Z",
+        ))
+        .unwrap();
+
+        exchange_events(&mut a, &mut b);
+
+        let state_a = folded_state(&a);
+        let state_b = folded_state(&b);
+        assert_eq!(state_a, state_b);
+        assert_eq!(state_a.len(), 2);
+    }
+
+    #[test]
+    fn convergence_conflicting_edits_lww_by_timestamp() {
+        let mut a = test_database();
+        let mut b = test_database();
+        let todo_uuid = Uuid::new_v4();
+
+        // Both machines create the same todo (same UUID — as if synced once)
+        let create = make_event(
+            a.device_id().unwrap(),
+            todo_uuid,
+            EventType::Create,
+            EventPayload::Create {
+                description: "Original".to_owned(),
+                due_date: date("2026-10-08"),
+            },
+            "2026-10-07T09:00:00Z",
+        );
+        a.append_event(&create).unwrap();
+        b.append_event(&create).unwrap();
+
+        // Both machines edit the description concurrently (offline)
+        a.append_event(&make_event(
+            a.device_id().unwrap(),
+            todo_uuid,
+            EventType::Update,
+            EventPayload::Update {
+                description: Some("A's edit".to_owned()),
+                due_date: None,
+                completed_on: None,
+            },
+            "2026-10-07T10:00:00Z",
+        ))
+        .unwrap();
+
+        b.append_event(&make_event(
+            b.device_id().unwrap(),
+            todo_uuid,
+            EventType::Update,
+            EventPayload::Update {
+                description: Some("B's edit".to_owned()),
+                due_date: None,
+                completed_on: None,
+            },
+            "2026-10-07T11:00:00Z", // later — should win
+        ))
+        .unwrap();
+
+        exchange_events(&mut a, &mut b);
+
+        let state_a = folded_state(&a);
+        let state_b = folded_state(&b);
+        assert_eq!(state_a, state_b);
+        assert_eq!(state_a.len(), 1);
+        // B's edit has a later timestamp → LWW → B wins
+        assert_eq!(state_a[0].description, "B's edit");
+    }
+
+    #[test]
+    fn convergence_delete_vs_update_update_wins_if_later() {
+        let mut a = test_database();
+        let mut b = test_database();
+        let todo_uuid = Uuid::new_v4();
+
+        let create = make_event(
+            a.device_id().unwrap(),
+            todo_uuid,
+            EventType::Create,
+            EventPayload::Create {
+                description: "Task".to_owned(),
+                due_date: date("2026-10-08"),
+            },
+            "2026-10-07T09:00:00Z",
+        );
+        a.append_event(&create).unwrap();
+        b.append_event(&create).unwrap();
+
+        // A deletes at T1
+        a.append_event(&make_event(
+            a.device_id().unwrap(),
+            todo_uuid,
+            EventType::Delete,
+            EventPayload::Delete,
+            "2026-10-07T10:00:00Z",
+        ))
+        .unwrap();
+
+        // B updates at T2 > T1
+        b.append_event(&make_event(
+            b.device_id().unwrap(),
+            todo_uuid,
+            EventType::Update,
+            EventPayload::Update {
+                description: Some("Updated".to_owned()),
+                due_date: None,
+                completed_on: None,
+            },
+            "2026-10-07T11:00:00Z",
+        ))
+        .unwrap();
+
+        exchange_events(&mut a, &mut b);
+
+        let state_a = folded_state(&a);
+        let state_b = folded_state(&b);
+        assert_eq!(state_a, state_b);
+        // Update is later → todo survives with updated description
+        assert_eq!(state_a.len(), 1);
+        assert_eq!(state_a[0].description, "Updated");
+    }
+
+    #[test]
+    fn convergence_delete_vs_update_delete_wins_if_later() {
+        let mut a = test_database();
+        let mut b = test_database();
+        let todo_uuid = Uuid::new_v4();
+
+        let create = make_event(
+            a.device_id().unwrap(),
+            todo_uuid,
+            EventType::Create,
+            EventPayload::Create {
+                description: "Task".to_owned(),
+                due_date: date("2026-10-08"),
+            },
+            "2026-10-07T09:00:00Z",
+        );
+        a.append_event(&create).unwrap();
+        b.append_event(&create).unwrap();
+
+        // A updates at T1
+        a.append_event(&make_event(
+            a.device_id().unwrap(),
+            todo_uuid,
+            EventType::Update,
+            EventPayload::Update {
+                description: Some("Updated".to_owned()),
+                due_date: None,
+                completed_on: None,
+            },
+            "2026-10-07T10:00:00Z",
+        ))
+        .unwrap();
+
+        // B deletes at T2 > T1
+        b.append_event(&make_event(
+            b.device_id().unwrap(),
+            todo_uuid,
+            EventType::Delete,
+            EventPayload::Delete,
+            "2026-10-07T11:00:00Z",
+        ))
+        .unwrap();
+
+        exchange_events(&mut a, &mut b);
+
+        let state_a = folded_state(&a);
+        let state_b = folded_state(&b);
+        assert_eq!(state_a, state_b);
+        // Delete is later → todo is gone
+        assert!(state_a.is_empty());
+    }
+
+    #[test]
+    fn convergence_events_deduplicated_after_double_exchange() {
+        let mut a = test_database();
+        let mut b = test_database();
+
+        a.emit(
+            Uuid::new_v4(),
+            EventType::Create,
+            EventPayload::Create {
+                description: "Test".to_owned(),
+                due_date: date("2026-10-08"),
+            },
+        )
+        .unwrap();
+
+        let count_before = a.all_events().unwrap().len();
+
+        // Exchange twice — second exchange should add nothing
+        exchange_events(&mut a, &mut b);
+        exchange_events(&mut a, &mut b);
+
+        let count_after = a.all_events().unwrap().len();
+        assert_eq!(count_before, count_after);
+
+        let count_b = b.all_events().unwrap().len();
+        assert_eq!(count_before, count_b);
+    }
+
+    #[test]
+    fn convergence_complex_interleaved_scenario() {
+        let mut a = test_database();
+        let mut b = test_database();
+        let dev_a = a.device_id().unwrap();
+        let dev_b = b.device_id().unwrap();
+
+        // Shared todo (synced once before going offline)
+        let shared = Uuid::new_v4();
+        let create_shared = make_event(
+            dev_a,
+            shared,
+            EventType::Create,
+            EventPayload::Create {
+                description: "Shared task".to_owned(),
+                due_date: date("2026-10-08"),
+            },
+            "2026-10-07T08:00:00Z",
+        );
+        a.append_event(&create_shared).unwrap();
+        b.append_event(&create_shared).unwrap();
+
+        // A: creates own todo, edits shared, completes shared
+        let a_own = Uuid::new_v4();
+        a.append_event(&make_event(
+            dev_a,
+            a_own,
+            EventType::Create,
+            EventPayload::Create {
+                description: "A's private".to_owned(),
+                due_date: date("2026-10-09"),
+            },
+            "2026-10-07T09:00:00Z",
+        ))
+        .unwrap();
+        a.append_event(&make_event(
+            dev_a,
+            shared,
+            EventType::Update,
+            EventPayload::Update {
+                description: Some("A edited".to_owned()),
+                due_date: None,
+                completed_on: None,
+            },
+            "2026-10-07T09:30:00Z",
+        ))
+        .unwrap();
+        a.append_event(&make_event(
+            dev_a,
+            shared,
+            EventType::Update,
+            EventPayload::Update {
+                description: None,
+                due_date: None,
+                completed_on: Some(Some(date("2026-10-07"))),
+            },
+            "2026-10-07T10:00:00Z",
+        ))
+        .unwrap();
+
+        // B: creates own todo, deletes shared (didn't see A's edits)
+        let b_own = Uuid::new_v4();
+        b.append_event(&make_event(
+            dev_b,
+            b_own,
+            EventType::Create,
+            EventPayload::Create {
+                description: "B's private".to_owned(),
+                due_date: date("2026-10-10"),
+            },
+            "2026-10-07T09:15:00Z",
+        ))
+        .unwrap();
+        b.append_event(&make_event(
+            dev_b,
+            shared,
+            EventType::Delete,
+            EventPayload::Delete,
+            "2026-10-07T09:45:00Z", // before A's complete at 10:00
+        ))
+        .unwrap();
+
+        exchange_events(&mut a, &mut b);
+
+        let state_a = folded_state(&a);
+        let state_b = folded_state(&b);
+
+        // Both machines must have identical state
+        assert_eq!(state_a, state_b);
+
+        // Expected: A's private + B's private exist; shared is completed (A's
+        // complete at 10:00 is the latest event for `shared`, after B's delete at 09:45)
+        assert_eq!(state_a.len(), 3);
+        let shared_todo = state_a.iter().find(|t| t.uuid == shared).unwrap();
+        assert_eq!(shared_todo.description, "A edited");
+        assert_eq!(shared_todo.completed_on, Some(date("2026-10-07")));
+    }
+
 }

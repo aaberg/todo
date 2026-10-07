@@ -19,29 +19,38 @@ pub struct Todo {
 /// Fold the event log into current todo state.
 /// Events MUST be pre-sorted by (timestamp, event_id) for deterministic order.
 /// Returns todos in creation order (stable for display ID assignment).
+///
+/// LWW semantics: the last event for a todo determines its state.
+/// A delete sets a flag on the entry; a later update unsets it (resurrection).
+/// Only todos whose final state is "not deleted" are returned.
 pub fn fold_events(events: &[Event]) -> Vec<Todo> {
-    let mut map: HashMap<Uuid, Todo> = HashMap::new();
+    let mut map: HashMap<Uuid, (Todo, bool)> = HashMap::new(); // bool = deleted
     let mut order: Vec<Uuid> = Vec::new();
 
     for event in events {
         match event.event_type {
             EventType::Create => {
                 if let EventPayload::Create { description, due_date } = &event.payload {
-                    let todo = Todo {
-                        uuid: event.todo_uuid,
-                        description: description.clone(),
-                        due_date: *due_date,
-                        completed_on: None,
-                        created_at: event.timestamp,
-                    };
                     if !map.contains_key(&event.todo_uuid) {
                         order.push(event.todo_uuid);
                     }
-                    map.insert(event.todo_uuid, todo);
+                    map.insert(
+                        event.todo_uuid,
+                        (
+                            Todo {
+                                uuid: event.todo_uuid,
+                                description: description.clone(),
+                                due_date: *due_date,
+                                completed_on: None,
+                                created_at: event.timestamp,
+                            },
+                            false,
+                        ),
+                    );
                 }
             }
             EventType::Update => {
-                if let Some(todo) = map.get_mut(&event.todo_uuid) {
+                if let Some((todo, deleted)) = map.get_mut(&event.todo_uuid) {
                     if let EventPayload::Update {
                         description,
                         due_date,
@@ -58,18 +67,25 @@ pub fn fold_events(events: &[Event]) -> Vec<Todo> {
                             todo.completed_on = *c;
                         }
                     }
+                    // LWW: an update after a delete resurrects the todo.
+                    *deleted = false;
                 }
             }
             EventType::Delete => {
-                map.remove(&event.todo_uuid);
-                order.retain(|u| *u != event.todo_uuid);
+                if let Some((_, deleted)) = map.get_mut(&event.todo_uuid) {
+                    *deleted = true;
+                }
             }
         }
     }
 
     order
         .into_iter()
-        .filter_map(|uuid| map.remove(&uuid))
+        .filter_map(|uuid| {
+            map.remove(&uuid)
+                .filter(|(_, deleted)| !deleted)
+                .map(|(todo, _)| todo)
+        })
         .collect()
 }
 
@@ -264,6 +280,55 @@ mod tests {
         let events = vec![
             create_event(device, todo_uuid, "Task", "2026-10-08", "2026-10-07T10:00:00Z"),
             delete_event(device, todo_uuid, "2026-10-07T11:00:00Z"),
+        ];
+
+        let todos = fold_events(&events);
+        assert!(todos.is_empty());
+    }
+
+    #[test]
+    fn fold_update_after_delete_resurrects() {
+        // LWW: update at T2 > delete at T1 → todo survives
+        let device = Uuid::new_v4();
+        let todo_uuid = Uuid::new_v4();
+        let events = vec![
+            create_event(device, todo_uuid, "Task", "2026-10-08", "2026-10-07T10:00:00Z"),
+            delete_event(device, todo_uuid, "2026-10-07T11:00:00Z"),
+            update_event(
+                device,
+                todo_uuid,
+                "2026-10-07T12:00:00Z",
+                EventPayload::Update {
+                    description: Some("Resurrected".to_owned()),
+                    due_date: None,
+                    completed_on: None,
+                },
+            ),
+        ];
+
+        let todos = fold_events(&events);
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].description, "Resurrected");
+    }
+
+    #[test]
+    fn fold_delete_after_update_stays_deleted() {
+        // LWW: delete at T2 > update at T1 → todo stays deleted
+        let device = Uuid::new_v4();
+        let todo_uuid = Uuid::new_v4();
+        let events = vec![
+            create_event(device, todo_uuid, "Task", "2026-10-08", "2026-10-07T10:00:00Z"),
+            update_event(
+                device,
+                todo_uuid,
+                "2026-10-07T11:00:00Z",
+                EventPayload::Update {
+                    description: Some("Updated".to_owned()),
+                    due_date: None,
+                    completed_on: None,
+                },
+            ),
+            delete_event(device, todo_uuid, "2026-10-07T12:00:00Z"),
         ];
 
         let todos = fold_events(&events);
