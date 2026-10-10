@@ -1,9 +1,12 @@
+mod callback;
 mod cli;
+mod config;
 mod date;
 mod db;
 mod display;
 mod event;
 mod model;
+mod sync;
 
 use std::{
     env,
@@ -140,6 +143,34 @@ fn run() -> Result<(), Box<dyn Error>> {
             print_log(id, &todo, &todo_events);
         }
         Commands::Prune => prune(&mut db, &todos)?,
+        Commands::Login { relay } => {
+            let relay_url = match relay {
+                Some(url) => url,
+                None => {
+                    let config = config::Config::load();
+                    config.sync_url.ok_or("no relay URL — use `todo login --relay <url>`")?
+                }
+            };
+            sync::login(&relay_url)?;
+        }
+        Commands::Sync => {
+            let config = config::Config::load();
+            let stats = sync::sync(&mut db, &config)?;
+            println!("Synced: pulled {} event(s), pushed {} event(s).", stats.pulled, stats.pushed);
+        }
+        Commands::Logout => {
+            let mut config = config::Config::load();
+            sync::logout(&mut config)?;
+            println!("Logged out.");
+        }
+        Commands::Whoami => {
+            let config = config::Config::load();
+            let me = sync::whoami(&config)?;
+            match me.email {
+                Some(email) => println!("Logged in as {email}"),
+                None => println!("Logged in (user {})", me.user_id),
+            }
+        }
     }
 
     Ok(())

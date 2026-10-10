@@ -11,3 +11,6 @@ rusqlite = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+open = "5"
+toml = "0.8"

@@ -9,3 +9,5 @@ relay/.env
 
 # OS
 .DS_Store
+
+.cargo/

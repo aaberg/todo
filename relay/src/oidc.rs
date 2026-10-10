@@ -12,7 +12,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreProviderMetadata},
     reqwest, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
-    EndpointNotSet, EndpointSet, IssuerUrl, Nonce, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    EndpointNotSet, EndpointSet, IssuerUrl, Nonce, OAuth2TokenResponse, RedirectUrl, Scope,
+    TokenResponse, TokenUrl,
 };
 use serde::Deserialize;
 
@@ -39,18 +40,32 @@ type ConfiguredClient = openidconnect::Client<
 >;
 
 /// Raw claims we extract from the ID token JWT payload (beyond what
-/// `IdTokenClaims` provides). Only `groups` — `email` and `sub` come
-/// from the validated typed claims.
+/// `IdTokenClaims` provides). Only used as fallback — primary source is
+/// the UserInfo endpoint, which is where modern Authelia puts `groups`.
 #[derive(Debug, Deserialize)]
 struct RawClaims {
     #[serde(default)]
     groups: Vec<String>,
+    #[serde(default)]
+    email: Option<String>,
 }
+
+/// Claims from the OIDC UserInfo endpoint response.
+#[derive(Debug, Deserialize)]
+struct UserInfoClaims {
+    #[serde(default)]
+    groups: Vec<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
 
 /// The OIDC client, ready to use after discovery.
 pub struct OidcClient {
     client: ConfiguredClient,
     http_client: reqwest::Client,
+    userinfo_url: Option<String>,
+    debug: bool,
 }
 
 /// Identity extracted from a validated ID token.
@@ -68,6 +83,7 @@ impl OidcClient {
         client_id: &str,
         client_secret: &str,
         redirect_uri: &str,
+        debug: bool,
     ) -> Result<Self, OidcError> {
         let http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -79,6 +95,13 @@ impl OidcClient {
         let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
             .await
             .map_err(|e| OidcError::Discovery(e))?;
+
+        // Extract the UserInfo endpoint URL — modern Authelia only puts
+        // groups/email there, not in the ID token.
+        let userinfo_url = provider_metadata
+            .userinfo_endpoint()
+            .map(|u| u.url().to_string());
+
 
         // from_provider_metadata returns a client with HasTokenUrl = EndpointMaybeSet.
         // authorize_url and exchange_code both require EndpointSet.
@@ -99,6 +122,8 @@ impl OidcClient {
         Ok(Self {
             client,
             http_client,
+            userinfo_url,
+            debug,
         })
     }
 
@@ -120,6 +145,9 @@ impl OidcClient {
     /// Exchange an authorization code for tokens and validate the ID token.
     /// Returns the user's identity if the token is valid and the user is
     /// in one of the allowed groups.
+    ///
+    /// Groups and email are fetched from the UserInfo endpoint (primary),
+    /// falling back to ID token claims if the endpoint is unavailable.
     pub async fn exchange_code(
         &self,
         code: &str,
@@ -133,7 +161,6 @@ impl OidcClient {
             .await
             .map_err(OidcError::TokenExchange)?;
 
-
         let id_token = token_response
             .id_token()
             .ok_or(OidcError::MissingIdToken)?;
@@ -144,10 +171,31 @@ impl OidcClient {
             .map_err(OidcError::Validation)?;
 
         let oidc_sub = claims.subject().to_string();
-        let email = claims.email().map(|e| e.to_string());
 
-        // Parse raw JWT payload for `groups` claim
-        let groups = extract_groups(id_token).unwrap_or_default();
+        // Debug: log full ID token payload (only when --debug is enabled)
+        if self.debug {
+            let raw = id_token.to_string();
+            if let Some(payload_b64) = raw.split('.').nth(1) {
+                if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(payload_b64) {
+                    if let Ok(payload_str) = String::from_utf8(payload_bytes) {
+                        tracing::warn!(id_token_payload = %payload_str, "debug: ID token payload");
+                    }
+                }
+            }
+        }
+
+        // Fetch groups/email from the UserInfo endpoint (primary source).
+        // Modern Authelia puts these claims only at UserInfo, not in the ID token.
+        let (groups, email) = match self.fetch_userinfo(token_response.access_token()).await {
+            Ok(ui) => (ui.groups, ui.email),
+            Err(e) => {
+                // Fallback: parse from ID token JWT payload
+                tracing::warn!(error = %e, "UserInfo endpoint failed, falling back to ID token claims");
+                let raw_groups = extract_groups(id_token).unwrap_or_default();
+                let raw_email = extract_email(id_token);
+                (raw_groups, raw_email.or_else(|| claims.email().map(|e| e.to_string())))
+            }
+        };
 
         // Group check: user must be in at least one allowed group
         if !allowed_groups.is_empty() {
@@ -163,6 +211,39 @@ impl OidcClient {
             groups,
         })
     }
+
+    /// Call the OIDC UserInfo endpoint with the access token.
+    /// Returns the parsed claims (groups, email).
+    async fn fetch_userinfo(
+        &self,
+        access_token: &openidconnect::AccessToken,
+    ) -> Result<UserInfoClaims, OidcError> {
+        let url = self
+            .userinfo_url
+            .as_ref()
+            .ok_or(OidcError::MissingUserInfoEndpoint)?;
+
+        let response = self
+            .http_client
+            .get(url)
+            .bearer_auth(access_token.secret())
+            .send()
+            .await
+            .map_err(OidcError::Http)?;
+
+        if !response.status().is_success() {
+            return Err(OidcError::UserInfoFailed(response.status().as_u16()));
+        }
+
+        let body = response.text().await.map_err(OidcError::Http)?;
+
+        // Debug: log full UserInfo response (only when --debug is enabled)
+        if self.debug {
+            tracing::warn!(userinfo_response = %body, "debug: UserInfo endpoint response");
+        }
+
+        serde_json::from_str(&body).map_err(OidcError::UserInfoParse)
+    }
 }
 
 /// Extract the `groups` claim from a raw ID token JWT.
@@ -175,6 +256,16 @@ fn extract_groups(id_token: &openidconnect::core::CoreIdToken) -> Option<Vec<Str
     let payload: RawClaims = serde_json::from_slice(&payload_bytes).ok()?;
     Some(payload.groups)
 }
+
+/// Extract the `email` claim from a raw ID token JWT payload.
+fn extract_email(id_token: &openidconnect::core::CoreIdToken) -> Option<String> {
+    let raw = id_token.to_string();
+    let payload_b64 = raw.split('.').nth(1)?;
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let payload: RawClaims = serde_json::from_slice(&payload_bytes).ok()?;
+    payload.email
+}
+
 
 #[derive(Debug)]
 pub enum OidcError {
@@ -191,6 +282,9 @@ pub enum OidcError {
     MissingIdToken,
     Validation(openidconnect::ClaimsVerificationError),
     MissingTokenEndpoint,
+    MissingUserInfoEndpoint,
+    UserInfoFailed(u16),
+    UserInfoParse(serde_json::Error),
     NotInAllowedGroup,
 }
 
@@ -206,6 +300,9 @@ impl std::fmt::Display for OidcError {
             OidcError::Validation(e) => write!(f, "ID token validation error: {e}"),
             OidcError::MissingTokenEndpoint => write!(f, "provider metadata has no token endpoint"),
             OidcError::NotInAllowedGroup => write!(f, "user is not in any allowed group"),
+            OidcError::MissingUserInfoEndpoint => write!(f, "provider metadata has no userinfo endpoint"),
+            OidcError::UserInfoFailed(status) => write!(f, "UserInfo endpoint returned HTTP {status}"),
+            OidcError::UserInfoParse(e) => write!(f, "UserInfo response parse error: {e}"),
         }
     }
 }

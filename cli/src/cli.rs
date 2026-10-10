@@ -43,4 +43,16 @@ pub enum Commands {
     Log { id: i64 },
     /// Permanently delete all completed todos
     Prune,
+    /// Log in to the sync relay (opens browser)
+    Login {
+        /// Relay URL, e.g. https://relay.example.com
+        #[arg(long)]
+        relay: Option<String>,
+    },
+    /// Synchronize todos with the relay
+    Sync,
+    /// Log out and revoke the session
+    Logout,
+    /// Show the currently logged-in user
+    Whoami,
 }

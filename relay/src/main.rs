@@ -17,6 +17,12 @@ use config::Config;
 use db::RelayDb;
 use oidc::OidcClient;
 
+
+/// Parse CLI args. Currently supports `--debug` to enable verbose debug logging.
+fn parse_debug_flag() -> bool {
+    std::env::args().any(|arg| arg == "--debug")
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
@@ -27,20 +33,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = Config::from_env()?;
+    let config = Config::from_env(parse_debug_flag())?;
     tracing::info!(
         bind = %config.bind,
         public_url = %config.public_url,
         oidc_issuer = %config.oidc_issuer,
+        debug_mode = config.debug,
         "starting todo-relay"
     );
-
     // OIDC discovery — fails fast if the provider is unreachable
     let oidc = OidcClient::discover(
         &config.oidc_issuer,
         &config.oidc_client_id,
         &config.oidc_client_secret,
         &config.redirect_uri(),
+        config.debug,
     )
     .await?;
     tracing::info!("OIDC discovery complete");

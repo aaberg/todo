@@ -10,10 +10,11 @@ pub struct Config {
     pub oidc_client_secret: String,
     pub allowed_groups: Vec<String>,
     pub session_ttl_secs: i64,
+    pub debug: bool,
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self, ConfigError> {
+    pub fn from_env(debug: bool) -> Result<Self, ConfigError> {
         Ok(Self {
             bind: env::var("TODO_RELAY_BIND")
                 .unwrap_or_else(|_| "127.0.0.1:3000".to_string()),
@@ -33,6 +34,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30 * 24 * 3600),
+            debug,
         })
     }
 
