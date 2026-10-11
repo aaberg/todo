@@ -8,7 +8,9 @@ use axum::{
 };
 use todo_common::wire::*;
 
-use crate::auth::{AppState, AuthSession};
+use crate::auth::{
+    AppState, AuthSession, PendingLogin, MAX_CALLBACK_URL_BYTES,
+};
 
 /// GET /health — no auth required.
 pub async fn health() -> &'static str {
@@ -37,21 +39,39 @@ pub async fn auth_login(
         return (StatusCode::BAD_REQUEST, "cli_callback must be a loopback URL").into_response();
     }
 
+    // Bound the variable-sized string retained per flow
+    if cli_callback.len() > MAX_CALLBACK_URL_BYTES {
+        return (
+            StatusCode::BAD_REQUEST,
+            "cli_callback too long",
+        )
+            .into_response();
+    }
+
+    // Generate state/nonce before taking the pending-map mutex so no
+    // mutex is held across any other work.
     let (authorize_url, csrf_token, nonce) = state.oidc.authorize_url();
 
-    // Store the pending login
+    // Store the pending login, pruning expired entries first and enforcing
+    // a hard capacity bound within the same critical section.
     {
         let mut pending = match state.pending_logins.lock() {
             Ok(p) => p,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
-        pending.insert(
+        let now = std::time::Instant::now();
+        if !crate::auth::admit_pending(
+            &mut pending,
             csrf_token.secret().clone(),
-            crate::auth::PendingLogin {
-                nonce,
-                cli_callback,
-            },
-        );
+            PendingLogin::new(nonce, cli_callback, now),
+            now,
+        ) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "login capacity temporarily exhausted, retry later",
+            )
+                .into_response();
+        }
     }
 
     Redirect::to(authorize_url.as_str()).into_response()
@@ -72,12 +92,16 @@ pub async fn auth_callback(
             Ok(p) => p,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
-        match pending_map.remove(&params.state) {
+        let pending = match pending_map.remove(&params.state) {
             Some(p) => p,
             None => {
                 return (StatusCode::BAD_REQUEST, "invalid or expired state").into_response();
             }
+        };
+        if pending.is_expired(std::time::Instant::now()) {
+            return (StatusCode::BAD_REQUEST, "invalid or expired state").into_response();
         }
+        pending
     };
 
     // Exchange code for tokens and validate

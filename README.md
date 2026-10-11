@@ -44,6 +44,15 @@ The session token is validated against the relay's `/me` before it is saved —
 a failed confirmation exits with an error and leaves your previous config
 untouched.
 
+The relay bounds pending login flows: each flow is valid for at most 5 minutes
+(aligned with the CLI's login timeout), at most 1,024 flows may be live at
+once, and the `cli_callback` URL is at most 2,048 decoded bytes. A login past
+the deadline — or a callback for an expired flow — is rejected without a
+token exchange, and the state is consumed either way (single-use). When all
+slots are full the relay answers `/auth/login` with 503 (login capacity
+temporarily exhausted, retry later); abandoned flows expire and are
+reclaimed on the next login, so retrying after a short wait succeeds.
+
 ### Run the relay locally (development)
 
 ```bash
