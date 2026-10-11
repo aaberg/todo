@@ -131,6 +131,57 @@ impl Database {
         Ok(events)
     }
 
+    /// Fetch events with rowid greater than `after_rowid`, ordered by rowid,
+    /// at most `limit` rows. Used for incremental push; rowid is the insertion
+    /// order of the local log and never reused.
+    pub fn events_since(
+        &self,
+        after_rowid: i64,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(i64, Event)>> {
+        let mut stmt = self.connection.prepare(
+            "SELECT rowid, event_id, device_id, timestamp, todo_uuid, event_type, payload
+             FROM events
+             WHERE rowid > ?1
+             ORDER BY rowid
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_rowid, limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            let (rowid, event_id, device_id, timestamp, todo_uuid, event_type, payload) = row?;
+            let event = Event {
+                event_id: parse_uuid(&event_id)?,
+                device_id: parse_uuid(&device_id)?,
+                timestamp: parse_datetime(&timestamp)?,
+                todo_uuid: parse_uuid(&todo_uuid)?,
+                event_type: EventType::from_str(&event_type)
+                    .ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(
+                        5, rusqlite::types::Type::Text,
+                        format!("unknown event_type: {event_type}").into(),
+                    ))?,
+                payload: serde_json::from_str(&payload).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6, rusqlite::types::Type::Text, Box::new(e),
+                    )
+                })?,
+            };
+            events.push((rowid, event));
+        }
+        Ok(events)
+    }
+
     /// Fetch events for a specific todo (for `todo log`).
     pub fn events_for_todo(&self, todo_uuid: Uuid) -> rusqlite::Result<Vec<Event>> {
         let mut stmt = self.connection.prepare(
@@ -423,6 +474,37 @@ mod tests {
         assert_eq!(db.get_state("key").unwrap(), Some("value".to_owned()));
         db.set_state("key", "updated").unwrap();
         assert_eq!(db.get_state("key").unwrap(), Some("updated".to_owned()));
+    }
+
+    #[test]
+    fn events_since_is_incremental_and_limited() {
+        let mut db = test_database();
+        let todo_uuid = Uuid::new_v4();
+        for i in 0..5 {
+            db.emit(
+                todo_uuid,
+                EventType::Create,
+                EventPayload::Create {
+                    description: format!("todo {i}"),
+                    due_date: date("2026-10-08"),
+                },
+            )
+            .unwrap();
+        }
+
+        let first = db.events_since(0, 3).unwrap();
+        assert_eq!(first.len(), 3);
+        assert!(first[0].0 < first[1].0 && first[1].0 < first[2].0);
+        assert_eq!(first[0].1.event_id, db.all_events().unwrap()[0].event_id);
+
+        let second = db.events_since(first[2].0, 3).unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(second[0].0 > first[2].0 && second[1].0 > second[0].0);
+        assert_ne!(second[0].1.event_id, first[2].1.event_id);
+        assert_ne!(second[1].1.event_id, second[0].1.event_id);
+
+        let empty = db.events_since(second[1].0, 3).unwrap();
+        assert!(empty.is_empty());
     }
 
     // ─── Convergence tests: two-machine sync simulation ───
