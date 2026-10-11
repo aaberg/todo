@@ -49,12 +49,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Commands::List { all } => {
             let mut display = with_display_ids(todos);
+            sort_for_display(&mut display, today);
             if !all {
                 display.retain(|(_, t)| {
                     t.completed_on.is_none() || t.completed_on == Some(today)
                 });
             }
-            sort_for_display(&mut display, today);
             print_list(&display, today);
         }
         Commands::Add { description, due } => {

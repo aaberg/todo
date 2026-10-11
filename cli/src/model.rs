@@ -414,6 +414,73 @@ mod tests {
     }
 
     #[test]
+    fn default_list_filter_keeps_canonical_ids() {
+        let device = Uuid::new_v4();
+        let hidden_uuid = Uuid::new_v4();
+        let visible_uuid = Uuid::new_v4();
+        let today = date("2026-10-08");
+        let events = vec![
+            create_event(device, hidden_uuid, "Old task", "2026-10-08", "2026-10-06T10:00:00Z"),
+            update_event(
+                device,
+                hidden_uuid,
+                "2026-10-06T11:00:00Z",
+                EventPayload::Update {
+                    description: None,
+                    due_date: None,
+                    completed_on: Some(Some(date("2026-10-07"))),
+                },
+            ),
+            create_event(device, visible_uuid, "Buy milk", "2026-10-09", "2026-10-06T12:00:00Z"),
+        ];
+        let todos = fold_events(&events);
+
+        let mut canonical = with_display_ids(todos.clone());
+        sort_for_display(&mut canonical, today);
+        let mut default_list = canonical.clone();
+        default_list.retain(|(_, t)| t.completed_on.is_none() || t.completed_on == Some(today));
+
+        assert_eq!(default_list.len(), 1);
+        assert_eq!(default_list[0].0, 2);
+        assert_eq!(default_list[0].1.uuid, visible_uuid);
+        assert_eq!(resolve_display_id(2, &default_list), Some(visible_uuid));
+        assert_eq!(resolve_display_id(2, &canonical), Some(visible_uuid));
+        assert_eq!(resolve_display_id(1, &canonical), Some(hidden_uuid));
+    }
+
+    #[test]
+    fn completed_today_todo_stays_visible_with_canonical_id() {
+        let device = Uuid::new_v4();
+        let done_uuid = Uuid::new_v4();
+        let open_uuid = Uuid::new_v4();
+        let today = date("2026-10-08");
+        let events = vec![
+            create_event(device, done_uuid, "Done today", "2026-10-08", "2026-10-06T10:00:00Z"),
+            update_event(
+                device,
+                done_uuid,
+                "2026-10-08T09:00:00Z",
+                EventPayload::Update {
+                    description: None,
+                    due_date: None,
+                    completed_on: Some(Some(today)),
+                },
+            ),
+            create_event(device, open_uuid, "Open", "2026-10-08", "2026-10-06T12:00:00Z"),
+        ];
+        let todos = fold_events(&events);
+
+        let mut canonical = with_display_ids(todos);
+        sort_for_display(&mut canonical, today);
+        let mut default_list = canonical.clone();
+        default_list.retain(|(_, t)| t.completed_on.is_none() || t.completed_on == Some(today));
+
+        assert_eq!(default_list.len(), 2);
+        assert_eq!(default_list[0].0, canonical[0].0);
+        assert_eq!(default_list[1].0, canonical[1].0);
+    }
+
+    #[test]
     fn overdue_open_todos_are_grouped_with_today() {
         let today = date("2026-08-11");
         let todo = Todo {

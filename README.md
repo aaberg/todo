@@ -28,6 +28,18 @@ todo log 1                  # show event history for todo 1
 todo prune                  # delete all completed todos
 ```
 
+### About the numbered IDs
+
+The numbers shown by `todo list` are ephemeral display IDs, reassigned on everyinvocation. They are always derived from the complete set of todos (the same set
+`todo list --all` shows and `edit`, `done`, `undone`, `remove`, and `log` use),
+so an ID printed by either listing mode refers to the same todo in every command.
+
+Because the default `todo list` hides todos completed before today, its output can
+contain gaps such as `2` and `4` — the missing IDs belong to hidden completed
+todos, which remain addressable with `todo list --all`. IDs are not persistent:
+adding, removing, completing, editing, or syncing todos can renumber them
+between invocations.
+
 ### Sync between machines
 
 ```bash
