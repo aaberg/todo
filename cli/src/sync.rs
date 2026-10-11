@@ -183,18 +183,10 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
 
     let pull_data: PullResponse = pull_resp.json().map_err(SyncError::Http)?;
 
-    // Apply pulled events locally (dedup by event_id via INSERT OR IGNORE)
-    let mut pulled_count = 0;
-    let mut latest_seq = last_pulled;
-    for pulled in &pull_data.events {
-        if let Ok(event) = from_wire(&pulled.event) {
-            db.append_event(&event).map_err(SyncError::Db)?;
-            pulled_count += 1;
-        }
-        latest_seq = latest_seq.max(pulled.seq);
-    }
-    db.set_state("last_pulled_seq", &latest_seq.to_string())
-        .map_err(SyncError::Db)?;
+    // Apply pulled events locally (dedup by event_id via INSERT OR IGNORE).
+    // The cursor only advances past successfully applied events; an event we
+    // can't parse stops the pull so it is retried (and surfaced) next sync.
+    let pulled_count = apply_pulled_events(db, last_pulled, &pull_data.events)?;
 
     // 2. PUSH: send only local events the relay has not seen yet, in batches.
     //
@@ -257,6 +249,40 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
 pub struct SyncStats {
     pub pulled: usize,
     pub pushed: usize,
+}
+
+/// Apply pulled events to the local log, advancing `last_pulled_seq` only
+/// through events that were successfully converted and appended. An event
+/// that fails `from_wire` aborts the pass: the cursor is left before it, the
+/// error is surfaced, and the event is retried on the next sync.
+fn apply_pulled_events(
+    db: &mut Database,
+    last_pulled: i64,
+    pulled_events: &[todo_common::wire::PulledEvent],
+) -> Result<usize, SyncError> {
+    let mut pulled_count = 0;
+    let mut latest_seq = last_pulled;
+    for pulled in pulled_events {
+        match from_wire(&pulled.event) {
+            Ok(event) => {
+                db.append_event(&event).map_err(SyncError::Db)?;
+                pulled_count += 1;
+                latest_seq = pulled.seq;
+            }
+            Err(e) => {
+                db.set_state("last_pulled_seq", &latest_seq.to_string())
+                    .map_err(SyncError::Db)?;
+                eprintln!(
+                    "aborting pull on incompatible event from relay (event_id {}, seq {}) — it will be retried on the next sync: {e}",
+                    pulled.event.event_id, pulled.seq
+                );
+                return Err(e);
+            }
+        }
+    }
+    db.set_state("last_pulled_seq", &latest_seq.to_string())
+        .map_err(SyncError::Db)?;
+    Ok(pulled_count)
 }
 
 // ─── Logout ───
@@ -424,5 +450,49 @@ mod tests {
             .1
             .into();
         assert_eq!(cli_callback, callback);
+    }
+
+    fn test_database() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn pull_cursor_stops_at_incompatible_event() {
+        let mut db = test_database();
+        let good = to_wire(&sample_event());
+        let mut bad = to_wire(&sample_event());
+        bad.event_type = "future_type".to_string();
+
+        let pulled = vec![
+            todo_common::wire::PulledEvent { seq: 1, event: good },
+            todo_common::wire::PulledEvent { seq: 2, event: bad },
+            todo_common::wire::PulledEvent { seq: 3, event: to_wire(&sample_event()) },
+        ];
+
+        let result = apply_pulled_events(&mut db, 0, &pulled);
+        assert!(result.is_err());
+
+        // Only the first event was applied; the cursor stays before the bad one.
+        assert_eq!(db.all_events().unwrap().len(), 1);
+        assert_eq!(db.get_state("last_pulled_seq").unwrap().as_deref(), Some("1"));
+
+        // Retrying from the saved cursor re-fetches the bad event first.
+        let next = apply_pulled_events(&mut db, 1, &pulled[1..]);
+        assert!(next.is_err());
+        assert_eq!(db.get_state("last_pulled_seq").unwrap().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn pull_cursor_advances_on_clean_pass() {
+        let mut db = test_database();
+        let events = vec![
+            todo_common::wire::PulledEvent { seq: 1, event: to_wire(&sample_event()) },
+            todo_common::wire::PulledEvent { seq: 2, event: to_wire(&sample_event()) },
+        ];
+
+        let count = apply_pulled_events(&mut db, 0, &events).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(db.all_events().unwrap().len(), 2);
+        assert_eq!(db.get_state("last_pulled_seq").unwrap().as_deref(), Some("2"));
     }
 }
