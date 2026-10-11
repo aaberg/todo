@@ -197,15 +197,28 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
 
     let pull_data: PullResponse = pull_resp.json().map_err(SyncError::Http)?;
 
-    // Apply pulled events locally (dedup by event_id via INSERT OR IGNORE)
+    // Apply pulled events locally (dedup by event_id via INSERT OR IGNORE).
+    // The cursor only advances past successfully applied events; an event we
+    // can't parse stops the pull so it is retried (and surfaced) next sync.
     let mut pulled_count = 0;
     let mut latest_seq = last_pulled;
     for pulled in &pull_data.events {
-        if let Ok(event) = from_wire(&pulled.event) {
-            db.append_event(&event).map_err(SyncError::Db)?;
-            pulled_count += 1;
+        match from_wire(&pulled.event) {
+            Ok(event) => {
+                db.append_event(&event).map_err(SyncError::Db)?;
+                pulled_count += 1;
+                latest_seq = pulled.seq;
+            }
+            Err(e) => {
+                db.set_state("last_pulled_seq", &latest_seq.to_string())
+                    .map_err(SyncError::Db)?;
+                eprintln!(
+                    "skipped incompatible event from relay (event_id {}, seq {}): {e}",
+                    pulled.event.event_id, pulled.seq
+                );
+                return Err(e);
+            }
         }
-        latest_seq = latest_seq.max(pulled.seq);
     }
     db.set_state("last_pulled_seq", &latest_seq.to_string())
         .map_err(SyncError::Db)?;
