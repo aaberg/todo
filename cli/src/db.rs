@@ -19,6 +19,14 @@ impl Database {
         Ok(database)
     }
 
+    /// Open an in-memory database (used by tests).
+    pub fn open_in_memory() -> rusqlite::Result<Self> {
+        let connection = Connection::open_in_memory()?;
+        let mut database = Self { connection };
+        database.initialize()?;
+        Ok(database)
+    }
+
     fn initialize(&mut self) -> rusqlite::Result<()> {
         // Clean slate: drop legacy todos table if it exists (Phase 1 artifact)
         self.connection.execute_batch("DROP TABLE IF EXISTS todos;")?;
