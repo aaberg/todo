@@ -44,6 +44,13 @@ The session token is validated against the relay's `/me` before it is saved —
 a failed confirmation exits with an error and leaves your previous config
 untouched.
 
+Pending logins on the relay are bounded: each login attempt is valid for at
+most five minutes, at most 1,024 attempts are retained at once, and each
+`cli_callback` URL is limited to 2,048 decoded bytes. Abandoned login
+attempts expire and are reclaimed on the next login. If the relay is at
+capacity, `/auth/login` returns HTTP 503 with a retry-later message;
+retrying after a short wait (or once other logins complete) succeeds.
+
 ### Run the relay locally (development)
 
 ```bash
