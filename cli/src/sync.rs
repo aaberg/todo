@@ -210,29 +210,61 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
     db.set_state("last_pulled_seq", &latest_seq.to_string())
         .map_err(SyncError::Db)?;
 
-    // 2. PUSH: send all local events to the relay
-    let all_events = db.all_events().map_err(SyncError::Db)?;
-    let wire_events: Vec<WireEvent> = all_events.iter().map(to_wire).collect();
+    // 2. PUSH: send only local events the relay has not seen yet, in batches.
+    //
+    // `last_pushed_rowid` is a cursor into the local log's implicit rowid
+    // (insertion order, never reused). It is advanced only after a batch is
+    // accepted, so a failed push retries the same range next time. The relay
+    // dedupes by (user_id, event_id) anyway, so a conservative cursor is safe.
+    const PUSH_BATCH_SIZE: usize = 500;
+
+    let mut pushed_rowid: i64 = db
+        .get_state("last_pushed_rowid")
+        .map_err(SyncError::Db)?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let mut pushed_count = 0;
 
     let push_url = format!("{}/push", relay_url);
-    let push_resp = client
-        .post(&push_url)
-        .bearer_auth(token)
-        .json(&PushRequest {
-            events: wire_events,
-        })
-        .send()
-        .map_err(SyncError::Http)?;
 
-    if !push_resp.status().is_success() {
-        return Err(SyncError::RelayError(push_resp.status().as_u16()));
+    loop {
+        let batch = db
+            .events_since(pushed_rowid, PUSH_BATCH_SIZE)
+            .map_err(SyncError::Db)?;
+        if batch.is_empty() {
+            break;
+        }
+
+        let last_rowid = batch.last().unwrap().0;
+        let wire_events: Vec<WireEvent> = batch.iter().map(|(_, e)| to_wire(e)).collect();
+
+        let push_resp = client
+            .post(&push_url)
+            .bearer_auth(token)
+            .json(&PushRequest { events: wire_events })
+            .send()
+            .map_err(SyncError::Http)?;
+
+        if !push_resp.status().is_success() {
+            return Err(SyncError::RelayError(push_resp.status().as_u16()));
+        }
+
+        let push_data: PushResponse = push_resp.json().map_err(SyncError::Http)?;
+        pushed_count += push_data.accepted;
+
+        // Advance the cursor only after the relay confirmed the batch.
+        pushed_rowid = last_rowid;
+        db.set_state("last_pushed_rowid", &pushed_rowid.to_string())
+            .map_err(SyncError::Db)?;
+
+        if batch.len() < PUSH_BATCH_SIZE {
+            break;
+        }
     }
-
-    let push_data: PushResponse = push_resp.json().map_err(SyncError::Http)?;
 
     Ok(SyncStats {
         pulled: pulled_count,
-        pushed: push_data.accepted,
+        pushed: pushed_count,
     })
 }
 
