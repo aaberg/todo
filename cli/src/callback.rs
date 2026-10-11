@@ -110,9 +110,9 @@ impl CallbackServer {
 
     /// Validate a request line and extract the session token.
     ///
-    /// Accepts only GET requests to `/callback` carrying exactly one `state`
-    /// parameter matching this server's state and exactly one non-empty
-    /// `token` parameter.
+    /// Accepts only GET requests to the exact target `/callback?...` —
+    /// carrying exactly one `state` parameter matching this server's state
+    /// and exactly one non-empty `token` parameter.
     fn extract_callback(&self, request_line: &str) -> Option<String> {
         let mut parts = request_line.split_whitespace();
         let method = parts.next()?;
@@ -120,10 +120,11 @@ impl CallbackServer {
             return None;
         }
         let target = parts.next()?;
-        let url = reqwest::Url::parse(&format!("http://127.0.0.1{}", target)).ok()?;
-        if url.path() != "/callback" {
+        let raw_path = target.split('?').next().unwrap_or("");
+        if raw_path != "/callback" {
             return None;
         }
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1{}", target)).ok()?;
 
         let mut state_count = 0;
         let mut token: Option<String> = None;
@@ -321,6 +322,12 @@ mod tests {
         let server = CallbackServer::bind().unwrap();
         assert!(server.extract_callback("POST /callback?state=x&token=y HTTP/1.1").is_none());
         assert!(server.extract_callback("GET /not-the-callback?state=x&token=y HTTP/1.1").is_none());
+        assert!(server
+            .extract_callback(&format!("GET /other/../callback?state={}&token=t HTTP/1.1", server.state))
+            .is_none());
+        assert!(server
+            .extract_callback(&format!("GET /callback/../callback?state={}&token=t HTTP/1.1", server.state))
+            .is_none());
         assert!(server.extract_callback("GET /callback?/x?state=x&token=y HTTP/1.1").is_none());
         assert!(server.extract_callback(&format!("GET /callback?state={}&token= HTTP/1.1", server.state)).is_none());
         assert!(server.extract_callback("GET /callback HTTP/1.1").is_none());
