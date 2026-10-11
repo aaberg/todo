@@ -8,7 +8,9 @@ use axum::{
 };
 use todo_common::wire::*;
 
-use crate::auth::{AppState, AuthSession};
+use crate::auth::{
+    admit_pending, AppState, AuthSession, PendingLogin, MAX_CALLBACK_BYTES, PENDING_LOGIN_LIFETIME,
+};
 
 /// GET /health — no auth required.
 pub async fn health() -> &'static str {
@@ -32,6 +34,11 @@ pub async fn auth_login(
         }
     };
 
+    // Bound the variable-sized data retained per flow, before any pending-state allocation.
+    if cli_callback.len() > MAX_CALLBACK_BYTES {
+        return (StatusCode::BAD_REQUEST, "cli_callback is too long").into_response();
+    }
+
     // Validate the callback URL is a loopback address (security: prevent open redirect)
     if !is_valid_loopback_url(&cli_callback) {
         return (StatusCode::BAD_REQUEST, "cli_callback must be a loopback URL").into_response();
@@ -39,19 +46,26 @@ pub async fn auth_login(
 
     let (authorize_url, csrf_token, nonce) = state.oidc.authorize_url();
 
-    // Store the pending login
+    // Admit the pending login under one critical section: prune expired
+    // entries, check capacity, then insert. Never evict a live flow.
     {
         let mut pending = match state.pending_logins.lock() {
             Ok(p) => p,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
-        pending.insert(
-            csrf_token.secret().clone(),
-            crate::auth::PendingLogin {
-                nonce,
-                cli_callback,
-            },
-        );
+        let now = std::time::Instant::now();
+        let entry = PendingLogin {
+            nonce,
+            cli_callback,
+            expires_at: now + PENDING_LOGIN_LIFETIME,
+        };
+        if !admit_pending(&mut pending, csrf_token.secret().clone(), entry, now) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "login capacity temporarily exhausted, retry later",
+            )
+                .into_response();
+        }
     }
 
     Redirect::to(authorize_url.as_str()).into_response()
@@ -73,7 +87,16 @@ pub async fn auth_callback(
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
         match pending_map.remove(&params.state) {
-            Some(p) => p,
+            Some(p) => {
+                if p.is_expired(std::time::Instant::now()) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "invalid or expired state",
+                    )
+                        .into_response();
+                }
+                p
+            }
             None => {
                 return (StatusCode::BAD_REQUEST, "invalid or expired state").into_response();
             }
