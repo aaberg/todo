@@ -213,7 +213,7 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
                 db.set_state("last_pulled_seq", &latest_seq.to_string())
                     .map_err(SyncError::Db)?;
                 eprintln!(
-                    "skipped incompatible event from relay (event_id {}, seq {}): {e}",
+                    "aborting pull on incompatible event from relay (event_id {}, seq {}): {e}",
                     pulled.event.event_id, pulled.seq
                 );
                 return Err(e);
