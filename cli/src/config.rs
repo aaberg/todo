@@ -48,11 +48,6 @@ impl Config {
         }
         Ok(())
     }
-
-    pub fn is_logged_in(&self) -> bool {
-        self.session_token.is_some() && self.sync_url.is_some()
-    }
-
     pub fn require_auth(&self) -> Result<(&str, &str), ConfigError> {
         match (&self.sync_url, &self.session_token) {
             (Some(url), Some(token)) => Ok((url, token)),
@@ -117,7 +112,6 @@ mod tests {
     #[test]
     fn default_config_is_not_logged_in() {
         let config = Config::default();
-        assert!(!config.is_logged_in());
         assert!(config.require_auth().is_err());
     }
 
@@ -128,9 +122,9 @@ mod tests {
             session_token: Some("token".to_string()),
             device_id: None,
         };
-        assert!(config.is_logged_in());
         assert!(config.require_auth().is_ok());
     }
+
 
     #[test]
     fn ensure_device_id_generates_and_persists() {

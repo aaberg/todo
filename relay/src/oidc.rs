@@ -73,7 +73,6 @@ pub struct OidcClient {
 pub struct UserIdentity {
     pub oidc_sub: String,
     pub email: Option<String>,
-    pub groups: Vec<String>,
 }
 
 impl OidcClient {
@@ -208,7 +207,6 @@ impl OidcClient {
         Ok(UserIdentity {
             oidc_sub,
             email,
-            groups,
         })
     }
 
@@ -272,7 +270,6 @@ pub enum OidcError {
     Http(reqwest::Error),
     Url(openidconnect::url::ParseError),
     Discovery(openidconnect::DiscoveryError<openidconnect::HttpClientError<reqwest::Error>>),
-    Configuration(openidconnect::ConfigurationError),
     TokenExchange(
         openidconnect::RequestTokenError<
             openidconnect::HttpClientError<reqwest::Error>,
@@ -294,7 +291,6 @@ impl std::fmt::Display for OidcError {
             OidcError::Http(e) => write!(f, "HTTP error: {e}"),
             OidcError::Url(e) => write!(f, "URL parse error: {e}"),
             OidcError::Discovery(e) => write!(f, "OIDC discovery error: {e}"),
-            OidcError::Configuration(e) => write!(f, "OIDC configuration error: {e}"),
             OidcError::TokenExchange(e) => write!(f, "token exchange error: {e}"),
             OidcError::MissingIdToken => write!(f, "no ID token in response"),
             OidcError::Validation(e) => write!(f, "ID token validation error: {e}"),

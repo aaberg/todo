@@ -11,7 +11,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use openidconnect::{CsrfToken, Nonce};
+use openidconnect::Nonce;
 use uuid::Uuid;
 
 use crate::{db::RelayDb, oidc::OidcClient};
@@ -29,7 +29,6 @@ pub struct AppState {
 /// A login flow in progress, waiting for the OIDC callback.
 #[derive(Debug, Clone)]
 pub struct PendingLogin {
-    pub csrf_token: CsrfToken,
     pub nonce: Nonce,
     /// Where to send the session token after successful login
     /// (the CLI's loopback URL, e.g. http://127.0.0.1:54321/callback)

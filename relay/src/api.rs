@@ -48,7 +48,6 @@ pub async fn auth_login(
         pending.insert(
             csrf_token.secret().clone(),
             crate::auth::PendingLogin {
-                csrf_token,
                 nonce,
                 cli_callback,
             },
