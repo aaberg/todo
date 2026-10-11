@@ -38,6 +38,12 @@ todo sync                                         # push local events, pull remo
 todo logout                                       # revoke session
 ```
 
+During `todo login`, the CLI starts a loopback server with a fresh per-attempt
+state value and only accepts the relay's callback when that state matches.
+The session token is validated against the relay's `/me` before it is saved —
+a failed confirmation exits with an error and leaves your previous config
+untouched.
+
 ### Run the relay locally (development)
 
 ```bash

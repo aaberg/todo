@@ -136,9 +136,14 @@ pub async fn auth_callback(
 
     tracing::info!(user_id = %user_id, email = ?identity.email, "user logged in");
 
-    // Redirect to CLI's loopback with the session token
-    let redirect_url = format!("{}?token={}", pending.cli_callback, token);
-    Redirect::to(&redirect_url).into_response()
+    // Redirect to CLI's loopback with the session token, preserving any
+    // existing callback query (e.g. the CLI's per-attempt state)
+    let mut redirect = url::Url::parse(&pending.cli_callback)
+        .expect("stored cli_callback was validated as a URL");
+    redirect
+        .query_pairs_mut()
+        .append_pair("token", &token);
+    Redirect::to(redirect.as_str()).into_response()
 }
 
 /// POST /push — requires auth. Push local events to the relay.

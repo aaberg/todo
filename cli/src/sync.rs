@@ -101,17 +101,22 @@ pub fn login(relay_url: &str) -> Result<(), SyncError> {
     println!("Waiting for login to complete...");
     let token = server.wait_for_token(LOGIN_TIMEOUT)?;
 
+    let me = confirm_login(relay_url, &token)?;
     save_session(relay_url, &token)?;
-    confirm_login(relay_url, &token);
+    match me.email {
+        Some(email) => println!("Logged in as {email}"),
+        None => println!("Logged in successfully"),
+    }
     Ok(())
 }
 
 /// Build the relay login URL with the CLI callback parameter.
 fn build_login_url(relay_url: &str, cli_callback: &str) -> String {
-    format!(
-        "{relay_url}/auth/login?cli_callback={}",
-        url_encode(cli_callback)
-    )
+    let mut url = reqwest::Url::parse(&format!("{relay_url}/auth/login"))
+        .expect("relay URL is valid");
+    url.query_pairs_mut()
+        .append_pair("cli_callback", cli_callback);
+    url.into()
 }
 
 /// Persist the session token and relay URL to config.
@@ -123,41 +128,22 @@ fn save_session(relay_url: &str, token: &str) -> Result<(), SyncError> {
     config.save().map_err(SyncError::Config)
 }
 
-/// Query `/me` to confirm the login and greet the user.
-fn confirm_login(relay_url: &str, token: &str) {
+/// Query `/me` to confirm the login before persisting credentials.
+fn confirm_login(relay_url: &str, token: &str) -> Result<MeResponse, SyncError> {
     let client = reqwest::blocking::Client::new();
     let me_url = format!("{relay_url}/me");
 
-    match client.get(&me_url).bearer_auth(token).send() {
-        Ok(resp) if resp.status().is_success() => match resp.json::<MeResponse>() {
-            Ok(me) => match me.email {
-                Some(email) => println!("Logged in as {email}"),
-                None => println!("Logged in successfully"),
-            },
-            Err(e) => {
-                eprintln!("failed to parse user info: {e}");
-                println!("Logged in successfully");
-            }
-        },
-        Ok(resp) => {
-            eprintln!("relay returned HTTP {}", resp.status().as_u16());
-            println!("Logged in successfully");
-        }
-        Err(e) => {
-            eprintln!("failed to confirm login: {e}");
-            println!("Logged in successfully");
-        }
+    let resp = client
+        .get(&me_url)
+        .bearer_auth(token)
+        .send()
+        .map_err(SyncError::Http)?;
+    if !resp.status().is_success() {
+        return Err(SyncError::RelayError(resp.status().as_u16()));
     }
+    resp.json::<MeResponse>().map_err(SyncError::Http)
 }
 
-/// Percent-encode a string for use in a URL query parameter.
-fn url_encode(s: &str) -> String {
-    s.replace(':', "%3A")
-        .replace('/', "%2F")
-        .replace('?', "%3F")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-}
 
 // ─── Sync ───
 
@@ -415,16 +401,28 @@ mod tests {
     }
 
     #[test]
-    fn url_encode_basic() {
-        assert_eq!(url_encode("http://127.0.0.1:54321/callback"), "http%3A%2F%2F127.0.0.1%3A54321%2Fcallback");
+    fn build_login_url_includes_callback() {
+        let url = build_login_url(
+            "https://relay.example.com",
+            "http://127.0.0.1:8080/callback?state=abc",
+        );
+        assert_eq!(
+            url,
+            "https://relay.example.com/auth/login?cli_callback=http%3A%2F%2F127.0.0.1%3A8080%2Fcallback%3Fstate%3Dabc"
+        );
     }
 
     #[test]
-    fn build_login_url_includes_callback() {
-        let url = build_login_url("https://relay.example.com", "http://127.0.0.1:8080/callback");
-        assert_eq!(
-            url,
-            "https://relay.example.com/auth/login?cli_callback=http%3A%2F%2F127.0.0.1%3A8080%2Fcallback"
-        );
+    fn build_login_url_round_trips_callback() {
+        let callback = "http://127.0.0.1:54321/callback?state=abc";
+        let url = build_login_url("https://relay.example.com", callback);
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        let cli_callback: String = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "cli_callback")
+            .unwrap()
+            .1
+            .into();
+        assert_eq!(cli_callback, callback);
     }
 }

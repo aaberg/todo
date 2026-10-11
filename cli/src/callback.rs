@@ -1,13 +1,16 @@
 //! Loopback HTTP server for the OAuth2/OIDC login callback.
 //!
-//! Binds a random port on 127.0.0.1, waits for the relay to redirect the
-//! browser back with a session token, and serves a simple success page.
+//! Binds a random port on 127.0.0.1 with a fresh per-attempt state value,
+//! waits for the relay to redirect the browser back with a matching state
+//! and a session token, and serves a simple receipt page.
 
 use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     time::{Duration, Instant},
 };
+
+use uuid::Uuid;
 
 use crate::sync::SyncError;
 
@@ -18,26 +21,31 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub struct CallbackServer {
     listener: TcpListener,
     port: u16,
+    state: String,
 }
 
 impl CallbackServer {
-    /// Bind a loopback listener on a random port.
+    /// Bind a loopback listener on a random port with a fresh state value.
     pub fn bind() -> Result<Self, SyncError> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(SyncError::Io)?;
         let port = listener.local_addr().map_err(SyncError::Io)?.port();
-        Ok(Self { listener, port })
+        let state = Uuid::new_v4().simple().to_string();
+        Ok(Self { listener, port, state })
     }
 
-    /// The callback URL to pass to the relay, e.g. `http://127.0.0.1:54321/callback`.
+    /// The callback URL to pass to the relay, e.g.
+    /// `http://127.0.0.1:54321/callback?state=<state>`.
     pub fn callback_url(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port)
+        format!("http://127.0.0.1:{}/callback?state={}", self.port, self.state)
     }
 
-    /// Wait for the relay to redirect the browser back with a session token.
+    /// Wait for the relay to redirect the browser back with a matching state
+    /// and a session token.
     ///
-    /// Single-threaded: polls the listener in a loop until a token arrives
-    /// or the timeout expires. No threads spawned, no leaks.
-    pub fn wait_for_token(&self, timeout: Duration) -> Result<String, SyncError> {
+    /// Single-threaded: polls the listener in a loop until a valid callback
+    /// arrives or the timeout expires. Rejected requests do not consume the
+    /// attempt. Once a matching callback is accepted, the listener is closed.
+    pub fn wait_for_token(self, timeout: Duration) -> Result<String, SyncError> {
         self.listener
             .set_nonblocking(true)
             .map_err(SyncError::Io)?;
@@ -47,7 +55,7 @@ impl CallbackServer {
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    if let Some(token) = handle_connection(stream) {
+                    if let Some(token) = self.handle_connection(stream) {
                         return Ok(token);
                     }
                 }
@@ -67,37 +75,83 @@ impl CallbackServer {
             }
         }
     }
-}
 
-/// Handle a single HTTP connection. Returns `Some(token)` if a token was
-/// captured, `None` otherwise (caller should keep accepting).
-fn handle_connection(mut stream: TcpStream) -> Option<String> {
-    let reader = match stream.try_clone() {
-        Ok(s) => BufReader::new(s),
-        Err(e) => {
-            eprintln!("callback server: clone stream error: {e}");
-            let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n");
+    /// Handle a single HTTP connection. Returns `Some(token)` if a valid
+    /// callback was captured, `None` otherwise (caller should keep accepting).
+    fn handle_connection(&self, mut stream: TcpStream) -> Option<String> {
+        let reader = match stream.try_clone() {
+            Ok(s) => BufReader::new(s),
+            Err(e) => {
+                eprintln!("callback server: clone stream error: {e}");
+                let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n");
+                return None;
+            }
+        };
+
+        let mut reader = reader;
+        let mut request_line = String::new();
+        if let Err(e) = reader.read_line(&mut request_line) {
+            eprintln!("callback server: read request error: {e}");
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
             return None;
         }
-    };
 
-    let mut reader = reader;
-    let mut request_line = String::new();
-    if let Err(e) = reader.read_line(&mut request_line) {
-        eprintln!("callback server: read request error: {e}");
-        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
-        return None;
+        match self.extract_callback(&request_line) {
+            Some(token) => {
+                write_response(&mut stream, 200, "text/html", RECEIPT_PAGE);
+                Some(token)
+            }
+            None => {
+                write_response(&mut stream, 400, "text/plain", "Bad Request");
+                None
+            }
+        }
     }
 
-    match extract_token(&request_line) {
-        Some(token) => {
-            write_response(&mut stream, 200, "text/html", SUCCESS_PAGE);
-            Some(token)
+    /// Validate a request line and extract the session token.
+    ///
+    /// Accepts only GET requests to the exact target `/callback?...` —
+    /// carrying exactly one `state` parameter matching this server's state
+    /// and exactly one non-empty `token` parameter.
+    fn extract_callback(&self, request_line: &str) -> Option<String> {
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next()?;
+        if method != "GET" {
+            return None;
         }
-        None => {
-            write_response(&mut stream, 400, "text/plain", "Bad Request");
-            None
+        let target = parts.next()?;
+        let raw_path = target.split('?').next().unwrap_or("");
+        if raw_path != "/callback" {
+            return None;
         }
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1{}", target)).ok()?;
+
+        let mut state_count = 0;
+        let mut token: Option<String> = None;
+        let mut token_count = 0;
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "state" => {
+                    state_count += 1;
+                    if value != self.state {
+                        return None;
+                    }
+                }
+                "token" => {
+                    token_count += 1;
+                    if value.is_empty() {
+                        return None;
+                    }
+                    token = Some(value.into_owned());
+                }
+                _ => {}
+            }
+        }
+
+        if state_count != 1 || token_count != 1 {
+            return None;
+        }
+        token
     }
 }
 
@@ -124,38 +178,13 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     let _ = stream.flush();
 }
 
-/// Extract the `token` query parameter from an HTTP request line.
-/// E.g. "GET /callback?token=abc123 HTTP/1.1" → Some("abc123")
-fn extract_token(request_line: &str) -> Option<String> {
-    let path = request_line.split_whitespace().nth(1)?;
-    let query = path.split('?').nth(1)?;
-    for pair in query.split('&') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if key == "token" {
-                return Some(url_decode(value));
-            }
-        }
-    }
-    None
-}
-
-fn url_decode(s: &str) -> String {
-    s.replace("%3A", ":")
-        .replace("%2F", "/")
-        .replace("%3F", "?")
-        .replace("%26", "&")
-        .replace("%3D", "=")
-        .replace("%2B", "+")
-        .replace("%20", " ")
-}
-
-/// Success page shown in the browser after login completes.
-const SUCCESS_PAGE: &str = r#"<!DOCTYPE html>
+/// Page shown in the browser when a valid callback was received.
+const RECEIPT_PAGE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>todo — logged in</title>
+<title>todo — login callback received</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -176,25 +205,14 @@ const SUCCESS_PAGE: &str = r#"<!DOCTYPE html>
   @media (prefers-color-scheme: dark) {
     .card { background: #2a2a2a; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
   }
-  .check {
-    width: 56px; height: 56px; margin: 0 auto 1.25rem;
-    border-radius: 50%; background: #16a34a;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .check svg { width: 28px; height: 28px; stroke: #fff; }
   h1 { font-size: 1.25rem; margin: 0 0 .5rem; font-weight: 600; }
   p { margin: 0; opacity: .7; font-size: .9rem; line-height: 1.5; }
 </style>
 </head>
 <body>
   <div class="card">
-    <div class="check">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="20 6 9 17 4 12"></polyline>
-      </svg>
-    </div>
-    <h1>Logged in</h1>
-    <p>You can close this tab and return to the terminal.</p>
+    <h1>Login response received</h1>
+    <p>The login response was delivered to the todo CLI. Check the terminal to see whether login completed. You can close this tab.</p>
   </div>
 </body>
 </html>"#;
@@ -216,82 +234,134 @@ mod tests {
         buf
     }
 
-    #[test]
-    fn extract_token_simple() {
-        let line = "GET /callback?token=abc123 HTTP/1.1";
-        assert_eq!(extract_token(line), Some("abc123".to_string()));
+    fn valid_request(state: &str, token: &str) -> String {
+        format!("GET /callback?state={state}&token={token} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     }
 
     #[test]
-    fn extract_token_missing() {
-        let line = "GET /callback HTTP/1.1";
-        assert_eq!(extract_token(line), None);
+    fn callback_url_contains_state() {
+        let server = CallbackServer::bind().unwrap();
+        assert_eq!(
+            server.callback_url(),
+            format!("http://127.0.0.1:{}/callback?state={}", server.port, server.state)
+        );
     }
 
     #[test]
-    fn extract_token_among_other_params() {
-        let line = "GET /callback?state=xyz&token=secret&foo=bar HTTP/1.1";
-        assert_eq!(extract_token(line), Some("secret".to_string()));
+    fn state_is_fresh_per_attempt() {
+        let a = CallbackServer::bind().unwrap();
+        let b = CallbackServer::bind().unwrap();
+        assert_ne!(a.state, b.state);
     }
 
     #[test]
-    fn extract_token_url_decoded() {
-        let line = "GET /callback?token=abc%3A123%2Fdef HTTP/1.1";
-        assert_eq!(extract_token(line), Some("abc:123/def".to_string()));
-    }
-
-    #[test]
-    fn extract_token_empty_value() {
-        let line = "GET /callback?token= HTTP/1.1";
-        assert_eq!(extract_token(line), Some("".to_string()));
-    }
-
-    #[test]
-    fn callback_server_captures_token() {
+    fn valid_callback_is_accepted_once() {
         let server = CallbackServer::bind().unwrap();
         let addr = server.listener.local_addr().unwrap().to_string();
+        let req = valid_request(&server.state, "session-token-1");
 
-        let handle = std::thread::spawn(move || {
-            send_request(
-                &addr,
-                "GET /callback?token=test-token-123 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
-            )
-        });
-
-        let token = server.wait_for_token(Duration::from_secs(5)).unwrap();
-        assert_eq!(token, "test-token-123");
-
-        let response = handle.join().unwrap();
-        assert!(response.contains("200 OK"));
-        assert!(response.contains("Logged in"));
-    }
-
-    #[test]
-    fn callback_server_rejects_missing_token_then_accepts() {
-        let server = CallbackServer::bind().unwrap();
-        let addr = server.listener.local_addr().unwrap().to_string();
-
-        // Run both requests and the server in a scoped thread so they
-        // run concurrently. The server processes the 400 request first,
-        // keeps running, then captures the token from the second request.
         std::thread::scope(|s| {
-            let client = s.spawn(move || {
-                // First: no token → 400
-                let resp = send_request(&addr, "GET /callback HTTP/1.1\r\n\r\n");
-                assert!(resp.contains("400 Bad Request"));
-                // Second: valid token → 200
-                send_request(
-                    &addr,
-                    "GET /callback?token=valid-token HTTP/1.1\r\n\r\n",
-                )
-            });
-
+            let client = s.spawn(move || send_request(&addr, &req));
             let token = server.wait_for_token(Duration::from_secs(5)).unwrap();
-            assert_eq!(token, "valid-token");
-
+            assert_eq!(token, "session-token-1");
             let resp = client.join().unwrap();
             assert!(resp.contains("200 OK"));
+            assert!(!resp.contains("Logged in"));
         });
+    }
+
+    #[test]
+    fn wrong_state_rejected_then_correct_completes() {
+        let server = CallbackServer::bind().unwrap();
+        let addr = server.listener.local_addr().unwrap().to_string();
+        let good = valid_request(&server.state, "real-token");
+
+        std::thread::scope(|s| {
+            let client = s.spawn(move || {
+                let bad = send_request(&addr, "GET /callback?state=wrong&token=attacker HTTP/1.1\r\n\r\n");
+                assert!(bad.contains("400 Bad Request"));
+                send_request(&addr, &good)
+            });
+            let token = server.wait_for_token(Duration::from_secs(5)).unwrap();
+            assert_eq!(token, "real-token");
+            assert!(client.join().unwrap().contains("200 OK"));
+        });
+    }
+
+    #[test]
+    fn foreign_attempt_state_is_rejected() {
+        let other = CallbackServer::bind().unwrap();
+        let server = CallbackServer::bind().unwrap();
+        assert!(server
+            .extract_callback(&format!(
+                "GET /callback?state={}&token=t HTTP/1.1",
+                other.state
+            ))
+            .is_none());
+    }
+
+    #[test]
+    fn missing_state_rejected_then_correct_completes() {
+        let server = CallbackServer::bind().unwrap();
+        let addr = server.listener.local_addr().unwrap().to_string();
+        let good = valid_request(&server.state, "t");
+
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                let bad = send_request(&addr, "GET /callback?token=attacker HTTP/1.1\r\n\r\n");
+                assert!(bad.contains("400 Bad Request"));
+                send_request(&addr, &good)
+            });
+            let token = server.wait_for_token(Duration::from_secs(5)).unwrap();
+            assert_eq!(token, "t");
+        });
+    }
+
+    #[test]
+    fn wrong_method_path_and_empty_token_rejected() {
+        let server = CallbackServer::bind().unwrap();
+        assert!(server.extract_callback("POST /callback?state=x&token=y HTTP/1.1").is_none());
+        assert!(server.extract_callback("GET /not-the-callback?state=x&token=y HTTP/1.1").is_none());
+        assert!(server
+            .extract_callback(&format!("GET /other/../callback?state={}&token=t HTTP/1.1", server.state))
+            .is_none());
+        assert!(server
+            .extract_callback(&format!("GET /callback/../callback?state={}&token=t HTTP/1.1", server.state))
+            .is_none());
+        assert!(server.extract_callback("GET /callback?/x?state=x&token=y HTTP/1.1").is_none());
+        assert!(server.extract_callback(&format!("GET /callback?state={}&token= HTTP/1.1", server.state)).is_none());
+        assert!(server.extract_callback("GET /callback HTTP/1.1").is_none());
+        assert!(server.extract_callback("garbage").is_none());
+    }
+
+    #[test]
+    fn duplicate_parameters_rejected_in_both_orders() {
+        let server = CallbackServer::bind().unwrap();
+        let state = &server.state;
+        assert!(server
+            .extract_callback(&format!("GET /callback?state={state}&state={state}&token=t HTTP/1.1"))
+            .is_none());
+        assert!(server
+            .extract_callback(&format!("GET /callback?token=t&token=t&state={state} HTTP/1.1"))
+            .is_none());
+        assert!(server
+            .extract_callback(&format!("GET /callback?state={state}&token=t&state={state} HTTP/1.1"))
+            .is_none());
+        assert!(server
+            .extract_callback(&format!("GET /callback?token=t&state={state}&token=t2 HTTP/1.1"))
+            .is_none());
+    }
+
+    #[test]
+    fn token_is_url_decoded() {
+        let server = CallbackServer::bind().unwrap();
+        let token = server
+            .extract_callback(&format!(
+                "GET /callback?state={}&token=abc%3A123%2Fdef HTTP/1.1",
+                server.state
+            ))
+            .unwrap();
+        assert_eq!(token, "abc:123/def");
     }
 
     #[test]
@@ -299,14 +369,5 @@ mod tests {
         let server = CallbackServer::bind().unwrap();
         let result = server.wait_for_token(Duration::from_millis(100));
         assert!(matches!(result, Err(SyncError::LoginTimeout)));
-    }
-
-    #[test]
-    fn callback_url_format() {
-        let server = CallbackServer::bind().unwrap();
-        assert_eq!(
-            server.callback_url(),
-            format!("http://127.0.0.1:{}/callback", server.port)
-        );
     }
 }
