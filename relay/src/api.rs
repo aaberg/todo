@@ -21,8 +21,13 @@ pub async fn health() -> &'static str {
 ///
 /// Human-facing status page. Confirms the relay is up and reachable at this URL.
 pub async fn status_page(State(state): State<AppState>) -> Html<&'static str> {
-    let public_url = state.config.public_url.as_str();
-    let html = STATUS_PAGE_HTML.replace("{{PUBLIC_URL}}", public_url);
+    let public_url = public_url
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
+    let html = STATUS_PAGE_HTML.replace("{{PUBLIC_URL}}", &public_url);
     Html(html.leak())
 }
 
