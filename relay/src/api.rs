@@ -20,15 +20,25 @@ pub async fn health() -> &'static str {
 /// GET / — no auth required.
 ///
 /// Human-facing status page. Confirms the relay is up and reachable at this URL.
-pub async fn status_page(State(state): State<AppState>) -> Html<&'static str> {
-    let public_url = public_url
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;");
-    let html = STATUS_PAGE_HTML.replace("{{PUBLIC_URL}}", &public_url);
-    Html(html.leak())
+pub async fn status_page(State(state): State<AppState>) -> Html<String> {
+    let public_url = html_escape(state.config.public_url.as_str());
+    Html(STATUS_PAGE_HTML.replace("{{PUBLIC_URL}}", &public_url))
+}
+
+/// Escape text for safe interpolation into HTML content.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 const STATUS_PAGE_HTML: &str = r##"<!DOCTYPE html>
