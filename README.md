@@ -33,6 +33,7 @@ todo prune                  # delete all completed todos
 ```bash
 # 1. Deploy the relay (see "Deploy the relay" below), then on each machine:
 todo login --relay https://relay.yourdomain.com   # opens browser, log in via Authelia
+# or: todo login, which asks for the relay URL (e.g. https://relay.example.com)
 todo whoami                                       # confirm: Logged in as you@example.com
 todo sync                                         # push local events, pull remote events
 todo logout                                       # revoke session

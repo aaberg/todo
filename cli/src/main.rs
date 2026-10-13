@@ -148,7 +148,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Some(url) => url,
                 None => {
                     let config = config::Config::load();
-                    config.sync_url.ok_or("no relay URL — use `todo login --relay <url>`")?
+                    let saved = config.sync_url.filter(|url| !url.trim().is_empty());
+                    prompt_relay_url(saved.as_deref())?
                 }
             };
             sync::login(&relay_url)?;
@@ -174,6 +175,31 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Ask the user for the sync relay URL.
+///
+/// Shows an example of the expected format. If a URL was saved by a previous
+/// login, it is offered as the default so pressing Enter reuses it.
+fn prompt_relay_url(saved_url: Option<&str>) -> Result<String, Box<dyn Error>> {
+    let prompt = match saved_url {
+        Some(url) => format!("Relay URL [default: {url}]: "),
+        None => "Relay URL (e.g. https://relay.example.com): ".to_string(),
+    };
+    print!("{prompt}");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        return match saved_url {
+            Some(url) => Ok(url.to_string()),
+            None => Err("no relay URL given — run `todo login --relay <url>` or enter a URL when prompted".into()),
+        };
+    }
+    Ok(input.to_string())
 }
 
 fn default_database_path() -> Result<PathBuf, Box<dyn Error>> {
