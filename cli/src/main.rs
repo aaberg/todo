@@ -180,19 +180,24 @@ fn run() -> Result<(), Box<dyn Error>> {
 /// Make a URL safe to print: strip userinfo and control characters so a
 /// legacy config value cannot leak a password or corrupt terminal output.
 fn sanitize_url_for_display(url: &str) -> String {
-    let mut cleaned: String = url
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
-    if let Ok(parsed) = reqwest::Url::parse(&cleaned) {
-        if !parsed.username().is_empty() || parsed.password().is_some() {
+    let cleaned: String = url.chars().filter(|c| !c.is_control()).collect();
+    match reqwest::Url::parse(&cleaned) {
+        Ok(parsed) => {
             let mut safe = parsed;
             safe.set_username("").ok();
             safe.set_password(None).ok();
-            cleaned = safe.into();
+            safe.into()
+        }
+        // Unparseable legacy value: if it might embed userinfo ("@"), fall
+        // back to a placeholder rather than risk printing credentials.
+        Err(_) => {
+            if cleaned.contains('@') {
+                "<invalid saved relay URL>".to_string()
+            } else {
+                cleaned
+            }
         }
     }
-    cleaned
 }
 
 /// Ask the user for the sync relay URL.
@@ -278,14 +283,26 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_url_redacts_userinfo_in_unparseable_values() {
+        assert_eq!(
+            sanitize_url_for_display("https://user:secret@relay with space"),
+            "<invalid saved relay URL>"
+        );
+        assert_eq!(
+            sanitize_url_for_display("just some not-url text"),
+            "just some not-url text"
+        );
+    }
+
+    #[test]
     fn sanitize_url_keeps_plain_urls_and_strips_control_chars() {
         assert_eq!(
             sanitize_url_for_display("https://relay.example.com"),
-            "https://relay.example.com"
+            "https://relay.example.com/"
         );
         assert_eq!(
             sanitize_url_for_display("https://relay.example.com\u{7}"),
-            "https://relay.example.com"
+            "https://relay.example.com/"
         );
     }
 }
