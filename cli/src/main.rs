@@ -181,8 +181,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 /// legacy config value cannot leak a password or corrupt terminal output.
 fn sanitize_url_for_display(url: &str) -> String {
     let cleaned: String = url.chars().filter(|c| !c.is_control()).collect();
-    match reqwest::Url::parse(&cleaned) {
         Ok(parsed) => {
+            if parsed.query().is_some() || parsed.fragment().is_some() {
+                return "<invalid saved relay URL>".to_string();
+            }
             let mut safe = parsed;
             safe.set_username("").ok();
             safe.set_password(None).ok();
