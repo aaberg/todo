@@ -120,11 +120,11 @@ reverse proxy to `127.0.0.1:3000`.
 
 ## Known Issues
 
-- **Device ID mismatch:** The CLI has two device IDs — one in the local DB
-  (`sync_state.device_id`, used when emitting events) and one in `config.toml`
-  (`device_id`, used as `exclude_device` when pulling). They don't match, so every
-  sync re-pulls the device's own events. Harmless (dedup by `event_id` catches them)
-  but wasteful. Fix: use `config.device_id` as the single source.
+- **Device ID mismatch (fixed):** The CLI used to have two device IDs — one in
+  the local DB (`sync_state.device_id`, used when emitting events) and one in
+  `config.toml` (`device_id`, used as `exclude_device` when pulling). They didn't
+  match, so every sync re-pulled the device's own events. `config.device_id` is now
+  the single source of truth, adopted into the DB at startup.
 - **No rate limiting on the relay.** Should add per-user limits.
 - **No auto-sync.** Sync is manual (`todo sync`). Could add sync-on-write or a
   `todo sync --watch` daemon mode.

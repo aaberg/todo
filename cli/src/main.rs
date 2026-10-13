@@ -39,6 +39,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     let today = Local::now().date_naive();
 
     let mut db = Database::open(default_database_path()?)?;
+    // The config's device_id (if it is a valid UUID) is the device identity:
+    // events emitted here carry it and sync excludes it when pulling, so a
+    // device never pulls back its own events. Without a usable config value
+    // the database keeps its own generated device_id.
+    if let Some(id) = config::Config::load()
+        .device_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+    {
+        db.adopt_device_id(id)?;
+    }
 
     // Fold the event log into current state.
     // For read-only commands (list, log) this is all we need.

@@ -78,8 +78,22 @@ impl Database {
         })
     }
 
+    /// Adopt an externally managed device_id (from config.toml) as this
+    /// database's identity, so events emitted here and the `exclude_device`
+    /// filter used when pulling refer to the same device. Idempotent.
+    pub fn adopt_device_id(&mut self, device_id: Uuid) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('device_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Append an event to the local log. This is the ONLY write path.
-    pub fn append_event(&mut self, event: &Event) -> rusqlite::Result<()> {
+    /// Returns true if the event was newly inserted, false if an event with
+    /// the same event_id already existed (dedup).
+    pub fn append_event(&mut self, event: &Event) -> rusqlite::Result<bool> {
         let payload = serde_json::to_string(&event.payload).map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(e))
         })?;
@@ -95,7 +109,7 @@ impl Database {
                 payload,
             ],
         )?;
-        Ok(())
+        Ok(self.connection.changes() > 0)
     }
 
     /// Fetch all events ordered by (timestamp, event_id) for deterministic folding.
@@ -307,6 +321,45 @@ mod tests {
         let a = db.device_id().unwrap();
         let b = db.device_id().unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn adopt_device_id_overrides_and_is_used_for_emitted_events() {
+        let mut db = test_database();
+        let external = Uuid::new_v4();
+        db.adopt_device_id(external).unwrap();
+        assert_eq!(db.device_id().unwrap(), external);
+        let event = db
+            .emit(
+                Uuid::new_v4(),
+                EventType::Create,
+                EventPayload::Create {
+                    description: "check".to_string(),
+                    due_date: date("2024-01-01"),
+                },
+            )
+            .unwrap();
+        assert_eq!(event.device_id, external);
+        // Re-adopting is idempotent.
+        db.adopt_device_id(external).unwrap();
+        assert_eq!(db.device_id().unwrap(), external);
+    }
+
+    #[test]
+    fn append_event_reports_whether_it_was_new() {
+        let mut db = test_database();
+        let device = db.device_id().unwrap();
+        let event = Event::new(
+            device,
+            Uuid::new_v4(),
+            EventType::Create,
+            EventPayload::Create {
+                description: "dup".to_string(),
+                due_date: date("2024-01-01"),
+            },
+        );
+        assert!(db.append_event(&event).unwrap());
+        assert!(!db.append_event(&event).unwrap());
     }
 
     #[test]
