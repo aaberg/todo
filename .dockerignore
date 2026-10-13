@@ -1,5 +1,6 @@
 target
 .git
+**/.env
 relay/relay.db
 relay/Caddyfile
 relay/todo-relay.service

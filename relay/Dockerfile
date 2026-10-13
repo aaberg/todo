@@ -1,5 +1,5 @@
 # Build the relay binary
-FROM rust:slim AS build
+FROM rust:slim-trixie AS build
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
@@ -10,7 +10,7 @@ COPY cli cli
 RUN cargo build --release -p todo-relay
 
 # Runtime image
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
