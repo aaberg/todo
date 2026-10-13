@@ -116,7 +116,7 @@ pub fn login(relay_url: &str) -> Result<(), SyncError> {
 fn build_login_url(relay_url: &str, cli_callback: &str) -> Result<String, SyncError> {
     let base = validate_relay_url(relay_url)?;
     let mut url = reqwest::Url::parse(&format!("{base}/auth/login"))
-        .map_err(|_| SyncError::InvalidRelayUrl(relay_url.to_string()))?;
+        .map_err(|_| SyncError::InvalidRelayUrl)?;
     url.query_pairs_mut()
         .append_pair("cli_callback", cli_callback);
     Ok(url.into())
@@ -127,18 +127,21 @@ fn build_login_url(relay_url: &str, cli_callback: &str) -> Result<String, SyncEr
 fn validate_relay_url(relay_url: &str) -> Result<String, SyncError> {
     let trimmed = relay_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
-        return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
+        return Err(SyncError::InvalidRelayUrl);
     }
-    let url = reqwest::Url::parse(trimmed).map_err(|_| SyncError::InvalidRelayUrl(relay_url.to_string()))?;
+    let url = reqwest::Url::parse(trimmed).map_err(|_| SyncError::InvalidRelayUrl)?;
     match url.scheme() {
         "http" | "https" => (),
-        _ => return Err(SyncError::InvalidRelayUrl(relay_url.to_string())),
+        _ => return Err(SyncError::InvalidRelayUrl),
     }
     if url.host_str().is_none() {
-        return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
+        return Err(SyncError::InvalidRelayUrl);
     }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
+        return Err(SyncError::InvalidRelayUrl);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(SyncError::InvalidRelayUrl);
     }
     Ok(trimmed.to_string())
 }
@@ -357,7 +360,7 @@ pub enum SyncError {
     MissingDeviceId,
     UnknownEventType(String),
     PayloadParse(serde_json::Error),
-    InvalidRelayUrl(String),
+    InvalidRelayUrl,
 }
 
 impl std::fmt::Display for SyncError {
@@ -372,9 +375,9 @@ impl std::fmt::Display for SyncError {
             SyncError::MissingDeviceId => write!(f, "missing device ID — run `todo login` first"),
             SyncError::UnknownEventType(t) => write!(f, "unknown event type from relay: {t}"),
             SyncError::PayloadParse(e) => write!(f, "failed to parse event payload: {e}"),
-            SyncError::InvalidRelayUrl(url) => write!(
+            SyncError::InvalidRelayUrl => write!(
                 f,
-                "invalid relay URL {url:?} — expected an HTTP(S) URL with a host and no query or fragment, e.g. https://relay.example.com"
+                "invalid relay URL — expected an HTTP(S) URL with a host, no query, fragment, or embedded credentials, e.g. https://relay.example.com"
             ),
         }
     }
@@ -509,6 +512,8 @@ mod tests {
             "https://",
             "https://relay.example.com?tenant=1",
             "https://relay.example.com#fragment",
+            "https://user@relay.example.com",
+            "https://user:secret@relay.example.com",
         ] {
             assert!(validate_relay_url(bad).is_err(), "expected {bad:?} to be rejected");
         }
@@ -517,7 +522,7 @@ mod tests {
     #[test]
     fn build_login_url_rejects_invalid_relay_url() {
         let result = build_login_url("not a url", "http://127.0.0.1:8080/callback?state=abc");
-        assert!(matches!(result, Err(SyncError::InvalidRelayUrl(_))));
+        assert!(matches!(result, Err(SyncError::InvalidRelayUrl)));
     }
 
     fn test_database() -> Database {
