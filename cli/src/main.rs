@@ -142,7 +142,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Some(url) => url,
                 None => {
                     let config = config::Config::load();
-                    config.sync_url.ok_or("no relay URL — use `todo login --relay <url>`")?
+                    let saved = config.sync_url.filter(|url| !url.trim().is_empty());
+                    prompt_relay_url(saved.as_deref())?
                 }
             };
             sync::login(&relay_url)?;
@@ -168,6 +169,56 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Make a URL safe to print: strip userinfo and control characters so a
+/// legacy config value cannot leak a password or corrupt terminal output.
+fn sanitize_url_for_display(url: &str) -> String {
+    let cleaned: String = url.chars().filter(|c| !c.is_control()).collect();
+        Ok(parsed) => {
+            if parsed.query().is_some() || parsed.fragment().is_some() {
+                return "<invalid saved relay URL>".to_string();
+            }
+            let mut safe = parsed;
+            safe.set_username("").ok();
+            safe.set_password(None).ok();
+            safe.into()
+        }
+        // Unparseable legacy value: if it might embed userinfo ("@"), fall
+        // back to a placeholder rather than risk printing credentials.
+        Err(_) => {
+            if cleaned.contains('@') {
+                "<invalid saved relay URL>".to_string()
+            } else {
+                cleaned
+            }
+        }
+    }
+}
+
+/// Ask the user for the sync relay URL.
+///
+/// Shows an example of the expected format. If a URL was saved by a previous
+/// login, it is offered as the default so pressing Enter reuses it.
+fn prompt_relay_url(saved_url: Option<&str>) -> Result<String, Box<dyn Error>> {
+    let prompt = match saved_url {
+        Some(url) => format!("Relay URL [default: {}]: ", sanitize_url_for_display(url)),
+        None => "Relay URL (e.g. https://relay.example.com): ".to_string(),
+    };
+    print!("{prompt}");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        return match saved_url {
+            Some(url) => Ok(url.to_string()),
+            None => Err("no relay URL given — run `todo login --relay <url>` or enter a URL when prompted".into()),
+        };
+    }
+    Ok(input.to_string())
 }
 
 fn default_database_path() -> Result<PathBuf, Box<dyn Error>> {
@@ -209,4 +260,45 @@ fn prune(db: &mut Database, todos: &[Todo]) -> Result<(), Box<dyn Error>> {
     }
     println!("Pruned {} todo(s).", completed.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_url_for_display;
+
+    #[test]
+    fn sanitize_url_strips_userinfo() {
+        assert_eq!(
+            sanitize_url_for_display("https://user:secret@relay.example.com"),
+            "https://relay.example.com/"
+        );
+        assert_eq!(
+            sanitize_url_for_display("https://user@relay.example.com"),
+            "https://relay.example.com/"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_redacts_userinfo_in_unparseable_values() {
+        assert_eq!(
+            sanitize_url_for_display("https://user:secret@relay with space"),
+            "<invalid saved relay URL>"
+        );
+        assert_eq!(
+            sanitize_url_for_display("just some not-url text"),
+            "just some not-url text"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_keeps_plain_urls_and_strips_control_chars() {
+        assert_eq!(
+            sanitize_url_for_display("https://relay.example.com"),
+            "https://relay.example.com/"
+        );
+        assert_eq!(
+            sanitize_url_for_display("https://relay.example.com\u{7}"),
+            "https://relay.example.com/"
+        );
+    }
 }
