@@ -177,11 +177,15 @@ fn confirm_login(relay_url: &str, token: &str) -> Result<MeResponse, SyncError> 
 /// Run a full sync: pull remote events, apply locally, push local events.
 pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> {
     let (relay_url, token) = config.require_auth().map_err(SyncError::Config)?;
+    // Prefer the config's device_id (the single source of truth, adopted into
+    // the DB at startup); fall back to the DB's identity if the config has no
+    // valid UUID. Either way this matches the device_id stamped on locally
+    // emitted events, so a device never pulls back its own events.
     let device_id: Uuid = config
         .device_id
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or(SyncError::MissingDeviceId)?;
+        .unwrap_or(db.device_id().map_err(SyncError::Db)?);
 
     let client = reqwest::blocking::Client::new();
     let relay_url = relay_url.trim_end_matches('/');
@@ -292,8 +296,9 @@ fn apply_pulled_events(
     for pulled in pulled_events {
         match from_wire(&pulled.event) {
             Ok(event) => {
-                db.append_event(&event).map_err(SyncError::Db)?;
-                pulled_count += 1;
+                if db.append_event(&event).map_err(SyncError::Db)? {
+                    pulled_count += 1;
+                }
                 latest_seq = pulled.seq;
             }
             Err(e) => {
@@ -357,7 +362,6 @@ pub enum SyncError {
     Config(crate::config::ConfigError),
     RelayError(u16),
     LoginTimeout,
-    MissingDeviceId,
     UnknownEventType(String),
     PayloadParse(serde_json::Error),
     InvalidRelayUrl,
@@ -372,7 +376,6 @@ impl std::fmt::Display for SyncError {
             SyncError::Config(e) => write!(f, "{e}"),
             SyncError::RelayError(code) => write!(f, "relay returned HTTP {code}"),
             SyncError::LoginTimeout => write!(f, "login timed out after 5 minutes"),
-            SyncError::MissingDeviceId => write!(f, "missing device ID — run `todo login` first"),
             SyncError::UnknownEventType(t) => write!(f, "unknown event type from relay: {t}"),
             SyncError::PayloadParse(e) => write!(f, "failed to parse event payload: {e}"),
             SyncError::InvalidRelayUrl => write!(
