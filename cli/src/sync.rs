@@ -84,9 +84,9 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Run the login flow: start a loopback server, open the browser, wait for
 /// the relay to redirect back with a session token.
 pub fn login(relay_url: &str) -> Result<(), SyncError> {
-    let relay_url = relay_url.trim_end_matches('/');
+    let relay_url = validate_relay_url(relay_url)?;
     let server = CallbackServer::bind()?;
-    let login_url = build_login_url(relay_url, &server.callback_url());
+    let login_url = build_login_url(&relay_url, &server.callback_url())?;
 
     println!("Opening browser for login...");
     println!("If the browser doesn't open, visit:");
@@ -101,8 +101,8 @@ pub fn login(relay_url: &str) -> Result<(), SyncError> {
     println!("Waiting for login to complete...");
     let token = server.wait_for_token(LOGIN_TIMEOUT)?;
 
-    let me = confirm_login(relay_url, &token)?;
-    save_session(relay_url, &token)?;
+    let me = confirm_login(&relay_url, &token)?;
+    save_session(&relay_url, &token)?;
     match me.email {
         Some(email) => println!("Logged in as {email}"),
         None => println!("Logged in successfully"),
@@ -111,12 +111,33 @@ pub fn login(relay_url: &str) -> Result<(), SyncError> {
 }
 
 /// Build the relay login URL with the CLI callback parameter.
-fn build_login_url(relay_url: &str, cli_callback: &str) -> String {
-    let mut url = reqwest::Url::parse(&format!("{relay_url}/auth/login"))
-        .expect("relay URL is valid");
+/// Rejects relay URLs that are not valid HTTP(S) URLs with a host so that
+/// bad `--relay` values or prompted input surface as an error, not a panic.
+fn build_login_url(relay_url: &str, cli_callback: &str) -> Result<String, SyncError> {
+    let base = validate_relay_url(relay_url)?;
+    let mut url = reqwest::Url::parse(&format!("{base}/auth/login"))
+        .map_err(|_| SyncError::InvalidRelayUrl(relay_url.to_string()))?;
     url.query_pairs_mut()
         .append_pair("cli_callback", cli_callback);
-    url.into()
+    Ok(url.into())
+}
+
+/// Check that a relay URL is an absolute HTTP(S) URL with a host, returning
+/// it without a trailing slash.
+fn validate_relay_url(relay_url: &str) -> Result<String, SyncError> {
+    let trimmed = relay_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
+    }
+    let url = reqwest::Url::parse(trimmed).map_err(|_| SyncError::InvalidRelayUrl(relay_url.to_string()))?;
+    match url.scheme() {
+        "http" | "https" => (),
+        _ => return Err(SyncError::InvalidRelayUrl(relay_url.to_string())),
+    }
+    if url.host_str().is_none() {
+        return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Persist the session token and relay URL to config.
@@ -333,6 +354,7 @@ pub enum SyncError {
     MissingDeviceId,
     UnknownEventType(String),
     PayloadParse(serde_json::Error),
+    InvalidRelayUrl(String),
 }
 
 impl std::fmt::Display for SyncError {
@@ -347,6 +369,10 @@ impl std::fmt::Display for SyncError {
             SyncError::MissingDeviceId => write!(f, "missing device ID — run `todo login` first"),
             SyncError::UnknownEventType(t) => write!(f, "unknown event type from relay: {t}"),
             SyncError::PayloadParse(e) => write!(f, "failed to parse event payload: {e}"),
+            SyncError::InvalidRelayUrl(url) => write!(
+                f,
+                "invalid relay URL {url:?} — expected an HTTP(S) URL with a host, e.g. https://relay.example.com"
+            ),
         }
     }
 }
@@ -431,7 +457,8 @@ mod tests {
         let url = build_login_url(
             "https://relay.example.com",
             "http://127.0.0.1:8080/callback?state=abc",
-        );
+        )
+        .unwrap();
         assert_eq!(
             url,
             "https://relay.example.com/auth/login?cli_callback=http%3A%2F%2F127.0.0.1%3A8080%2Fcallback%3Fstate%3Dabc"
@@ -441,7 +468,7 @@ mod tests {
     #[test]
     fn build_login_url_round_trips_callback() {
         let callback = "http://127.0.0.1:54321/callback?state=abc";
-        let url = build_login_url("https://relay.example.com", callback);
+        let url = build_login_url("https://relay.example.com", callback).unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
         let cli_callback: String = parsed
             .query_pairs()
@@ -450,6 +477,42 @@ mod tests {
             .1
             .into();
         assert_eq!(cli_callback, callback);
+    }
+
+    #[test]
+    fn validate_relay_url_accepts_http_and_https_with_host() {
+        assert_eq!(
+            validate_relay_url("https://relay.example.com").unwrap(),
+            "https://relay.example.com"
+        );
+        assert_eq!(
+            validate_relay_url("http://127.0.0.1:8080/").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            validate_relay_url("  https://relay.example.com/  ").unwrap(),
+            "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn validate_relay_url_rejects_bad_input() {
+        for bad in [
+            "",
+            "   ",
+            "relay.example.com",
+            "ftp://relay.example.com",
+            "file:///etc/passwd",
+            "https://",
+        ] {
+            assert!(validate_relay_url(bad).is_err(), "expected {bad:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn build_login_url_rejects_invalid_relay_url() {
+        let result = build_login_url("not a url", "http://127.0.0.1:8080/callback?state=abc");
+        assert!(matches!(result, Err(SyncError::InvalidRelayUrl(_))));
     }
 
     fn test_database() -> Database {
