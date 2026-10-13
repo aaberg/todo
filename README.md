@@ -109,6 +109,24 @@ relay.yourdomain.com {
 }
 ```
 
+### Deploy with Docker Compose
+
+An alternative to the systemd setup above: build the image and run it with
+Docker Compose. The container binds to `127.0.0.1:3000` on the host, so Caddy
+(or any other TLS reverse proxy) still terminates HTTPS in front of it.
+
+```bash
+cp relay/.env.example relay/.env
+# Edit relay/.env: set TODO_RELAY_PUBLIC_URL and the TODO_OIDC_* values
+# (TODO_RELAY_BIND and TODO_RELAY_DATABASE are set by the compose file)
+docker compose -f relay/compose.yaml up -d --build
+docker compose -f relay/compose.yaml logs -f
+```
+
+The SQLite database is stored in the `relay-data` Docker volume. Configuration
+is read from `relay/.env`, which is excluded from the image build via
+`.dockerignore`, so secrets never end up inside the image.
+
 ### Authelia setup
 
 Register an OIDC client in your Authelia `configuration.yml`:
