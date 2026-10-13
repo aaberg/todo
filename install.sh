@@ -58,7 +58,6 @@ need() {
 
 need uname
 need tar
-need shasum || need sha256sum || true
 for cmd in curl wget; do
     if command -v "$cmd" >/dev/null 2>&1; then
         DOWNLOADER="$cmd"
@@ -66,7 +65,18 @@ for cmd in curl wget; do
     fi
 done
 [ -n "${DOWNLOADER:-}" ] || { err "need curl or wget to download"; exit 1; }
-need shasum || need sha256sum || { err "need shasum or sha256sum to verify"; VERIFY_CHECKSUM=0; }
+
+if [ "$VERIFY_CHECKSUM" = "1" ]; then
+    if command -v shasum >/dev/null 2>&1; then
+        :
+    elif command -v sha256sum >/dev/null 2>&1; then
+        :
+    else
+        err "need shasum or sha256sum to verify the download"
+        err "install with --no-checksum to skip verification (not recommended)"
+        exit 1
+    fi
+fi
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -118,7 +128,7 @@ if [ -z "$DEST" ]; then
 fi
 mkdir -p "$DEST" || { err "cannot create install directory: $DEST"; exit 1; }
 
-TMPDIR_INSTALL="$(mktemp -d 2>/dev/null || mktemp -d -t todo-install)"
+TMPDIR_INSTALL="$(mktemp -d "$DEST/tmp.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/todo-install.XXXXXX")"
 trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
 
 fetch() {
@@ -137,8 +147,9 @@ fetch "$BASE_URL/$ARCHIVE" "$TMPDIR_INSTALL/$ARCHIVE"
 if [ "$VERIFY_CHECKSUM" = "1" ]; then
     say "--> Downloading $SUMS_FILE"
     if ! fetch "$BASE_URL/$SUMS_FILE" "$TMPDIR_INSTALL/$SUMS_FILE"; then
-        err "warning: could not download $SUMS_FILE; skipping verification" >&2
-        VERIFY_CHECKSUM=0
+        err "could not download $SUMS_FILE; aborting"
+        err "the download cannot be verified; install with --no-checksum to skip verification (not recommended)"
+        exit 1
     fi
 fi
 
