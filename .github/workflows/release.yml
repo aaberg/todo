@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --workspace --locked
+
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked -p todo -p todo-relay --target ${{ env.TARGET }}
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ env.TARGET }}/release/todo dist/todo
+          cp target/${{ env.TARGET }}/release/todo-relay dist/todo-relay
+          tar -czf todo-${{ env.TARGET }}.tar.gz -C dist todo
+          tar -czf todo-relay-${{ env.TARGET }}.tar.gz -C dist todo-relay
+          shasum -a 256 todo-${{ env.TARGET }}.tar.gz todo-relay-${{ env.TARGET }}.tar.gz > SHA256SUMS-linux
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            todo-${{ env.TARGET }}.tar.gz
+            todo-relay-${{ env.TARGET }}.tar.gz
+            SHA256SUMS-linux
+
+  build-macos:
+    name: Build macOS (universal)
+    runs-on: macos-latest
+    needs: test
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+
+      - name: Build CLI
+        run: |
+          cargo build --release --locked -p todo --target x86_64-apple-darwin
+          cargo build --release --locked -p todo --target aarch64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/todo \
+            target/aarch64-apple-darwin/release/todo \
+            -output dist/todo
+
+      - name: Build relay
+        run: |
+          cargo build --release --locked -p todo-relay --target x86_64-apple-darwin
+          cargo build --release --locked -p todo-relay --target aarch64-apple-darwin
+          lipo -create \
+            target/x86_64-apple-darwin/release/todo-relay \
+            target/aarch64-apple-darwin/release/todo-relay \
+            -output dist/todo-relay
+
+      - name: Package
+        run: |
+          tar -czf todo-universal-apple-darwin.tar.gz -C dist todo
+          tar -czf todo-relay-universal-apple-darwin.tar.gz -C dist todo-relay
+          shasum -a 256 todo-universal-apple-darwin.tar.gz todo-relay-universal-apple-darwin.tar.gz > SHA256SUMS-macos
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            todo-universal-apple-darwin.tar.gz
+            todo-relay-universal-apple-darwin.tar.gz
+            SHA256SUMS-macos
+
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    needs: test
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --locked -p todo -p todo-relay --target x86_64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          mkdir dist
+          copy target/x86_64-pc-windows-msvc/release/todo.exe dist/
+          copy target/x86_64-pc-windows-msvc/release/todo-relay.exe dist/
+          Compress-Archive -Path dist/todo.exe -DestinationPath todo-x86_64-pc-windows-msvc.zip
+          Compress-Archive -Path dist/todo-relay.exe -DestinationPath todo-relay-x86_64-pc-windows-msvc.zip
+          "{0}  {1}" -f (Get-FileHash todo-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower(), "todo-x86_64-pc-windows-msvc.zip" | Out-File -Encoding utf8 SHA256SUMS-windows.txt
+          "{0}  {1}" -f (Get-FileHash todo-relay-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower(), "todo-relay-x86_64-pc-windows-msvc.zip" | Out-File -Append -Encoding utf8 SHA256SUMS-windows.txt
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            todo-x86_64-pc-windows-msvc.zip
+            todo-relay-x86_64-pc-windows-msvc.zip
+            SHA256SUMS-windows.txt
+
+  docker:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: tags
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "tags=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/todo-relay:${VERSION},ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/todo-relay:latest" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: relay/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
