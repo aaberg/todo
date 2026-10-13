@@ -3,4 +3,4 @@ target
 relay/relay.db
 relay/Caddyfile
 relay/todo-relay.service
-relay/.env.example
+relay/.env*
