@@ -17,6 +17,113 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+/// GET / — no auth required.
+///
+/// Human-facing status page. Confirms the relay is up and reachable at this URL.
+pub async fn status_page(State(state): State<AppState>) -> Html<String> {
+    let public_url = html_escape(state.config.public_url.as_str());
+    Html(STATUS_PAGE_HTML.replace("{{PUBLIC_URL}}", &public_url))
+}
+
+/// Escape text for safe interpolation into HTML content.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+const STATUS_PAGE_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>todo relay — status</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f2f4f8;
+    color: #1c2733;
+    padding: 1.5rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #10161d; color: #e4e9ee; }
+    .card { background: #1a232c !important; box-shadow: 0 20px 50px rgba(0,0,0,.5) !important; }
+    .url { background: #10161d !important; color: #9fb3c8 !important; }
+    .status-badge { background: rgba(52, 199, 123, .15) !important; color: #34c77b !important; }
+  }
+  .card {
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 50px rgba(28, 39, 51, .12);
+    padding: 2.5rem 3rem;
+    max-width: 30rem;
+    width: 100%;
+    text-align: center;
+  }
+  .dot {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: #34c77b;
+    display: inline-block;
+    margin-right: 0.6rem;
+    box-shadow: 0 0 0 4px rgba(52, 199, 123, .25);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 4px rgba(52, 199, 123, .25); }
+    50% { box-shadow: 0 0 0 8px rgba(52, 199, 123, .1); }
+  }
+  h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.01em; }
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 1.25rem;
+    padding: 0.4rem 1rem;
+    border-radius: 999px;
+    background: rgba(52, 199, 123, .12);
+    color: #1e9e5c;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .url {
+    margin-top: 1.5rem;
+    background: #f2f4f8;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    color: #51616f;
+    overflow-wrap: anywhere;
+  }
+  footer { margin-top: 1.5rem; font-size: 0.8rem; color: #8a98a5; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1><span class="dot"></span>todo relay</h1>
+    <span class="status-badge">operational</span>
+    <div class="url">{{PUBLIC_URL}}</div>
+    <footer>Sync relay for the local-first todo CLI. Serving — page reached, relay is up.</footer>
+  </main>
+</body>
+</html>"##;
+
 /// GET /auth/login?cli_callback=<url>
 ///
 /// Starts the OIDC login flow. The `cli_callback` parameter is the CLI's
