@@ -161,9 +161,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         Commands::Whoami => {
             let config = config::Config::load();
             let me = sync::whoami(&config)?;
+            let relay = config
+                .sync_url
+                .as_deref()
+                .map(sanitize_url_for_display)
+                .unwrap_or_else(|| "<unknown>".to_string());
             match me.email {
-                Some(email) => println!("Logged in as {email}"),
-                None => println!("Logged in (user {})", me.user_id),
+                Some(email) => println!("Logged in as {email} on relay {relay}"),
+                None => println!("Logged in (user {}) on relay {relay}", me.user_id),
             }
         }
     }
