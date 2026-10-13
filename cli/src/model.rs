@@ -142,6 +142,18 @@ pub fn todo_order_within_group(todo: &Todo, today: NaiveDate) -> u8 {
     }
 }
 
+/// Prepare todos for listing: sort the complete set, assign canonical display
+/// IDs, then optionally apply the default list's visibility filter. The complete
+/// sorted set is the canonical ID mapping shared with the ID-based commands.
+pub fn prepare_for_display(todos: Vec<Todo>, today: NaiveDate, all: bool) -> Vec<(i64, Todo)> {
+    let mut display = with_display_ids(todos);
+    sort_for_display(&mut display, today);
+    if !all {
+        display.retain(|(_, t)| t.completed_on.is_none() || t.completed_on == Some(today));
+    }
+    display
+}
+
 /// Sort todos for display: by group, then within-group order, then due date, then creation.
 pub fn sort_for_display(todos: &mut [(i64, Todo)], today: NaiveDate) {
     todos.sort_by_key(|(_, todo)| {
@@ -435,17 +447,15 @@ mod tests {
         ];
         let todos = fold_events(&events);
 
-        let mut canonical = with_display_ids(todos.clone());
-        sort_for_display(&mut canonical, today);
-        let mut default_list = canonical.clone();
-        default_list.retain(|(_, t)| t.completed_on.is_none() || t.completed_on == Some(today));
+        let all_list = prepare_for_display(todos.clone(), today, true);
+        let default_list = prepare_for_display(todos, today, false);
 
         assert_eq!(default_list.len(), 1);
         assert_eq!(default_list[0].0, 2);
         assert_eq!(default_list[0].1.uuid, visible_uuid);
         assert_eq!(resolve_display_id(2, &default_list), Some(visible_uuid));
-        assert_eq!(resolve_display_id(2, &canonical), Some(visible_uuid));
-        assert_eq!(resolve_display_id(1, &canonical), Some(hidden_uuid));
+        assert_eq!(resolve_display_id(2, &all_list), Some(visible_uuid));
+        assert_eq!(resolve_display_id(1, &all_list), Some(hidden_uuid));
     }
 
     #[test]
@@ -470,14 +480,14 @@ mod tests {
         ];
         let todos = fold_events(&events);
 
-        let mut canonical = with_display_ids(todos);
-        sort_for_display(&mut canonical, today);
-        let mut default_list = canonical.clone();
-        default_list.retain(|(_, t)| t.completed_on.is_none() || t.completed_on == Some(today));
+        let all_list = prepare_for_display(todos.clone(), today, true);
+        let default_list = prepare_for_display(todos, today, false);
 
         assert_eq!(default_list.len(), 2);
-        assert_eq!(default_list[0].0, canonical[0].0);
-        assert_eq!(default_list[1].0, canonical[1].0);
+        assert_eq!(resolve_display_id(1, &default_list), Some(open_uuid));
+        assert_eq!(resolve_display_id(2, &default_list), Some(done_uuid));
+        assert_eq!(resolve_display_id(1, &all_list), Some(open_uuid));
+        assert_eq!(resolve_display_id(2, &all_list), Some(done_uuid));
     }
 
     #[test]

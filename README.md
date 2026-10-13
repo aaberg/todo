@@ -30,7 +30,8 @@ todo prune                  # delete all completed todos
 
 ### About the numbered IDs
 
-The numbers shown by `todo list` are ephemeral display IDs, reassigned on everyinvocation. They are always derived from the complete set of todos (the same set
+The numbers shown by `todo list` are ephemeral display IDs, reassigned on every
+invocation. They are always derived from the complete set of todos (the same set
 `todo list --all` shows and `edit`, `done`, `undone`, `remove`, and `log` use),
 so an ID printed by either listing mode refers to the same todo in every command.
 
