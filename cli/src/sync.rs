@@ -137,6 +137,9 @@ fn validate_relay_url(relay_url: &str) -> Result<String, SyncError> {
     if url.host_str().is_none() {
         return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
     }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(SyncError::InvalidRelayUrl(relay_url.to_string()));
+    }
     Ok(trimmed.to_string())
 }
 
@@ -371,7 +374,7 @@ impl std::fmt::Display for SyncError {
             SyncError::PayloadParse(e) => write!(f, "failed to parse event payload: {e}"),
             SyncError::InvalidRelayUrl(url) => write!(
                 f,
-                "invalid relay URL {url:?} — expected an HTTP(S) URL with a host, e.g. https://relay.example.com"
+                "invalid relay URL {url:?} — expected an HTTP(S) URL with a host and no query or fragment, e.g. https://relay.example.com"
             ),
         }
     }
@@ -504,6 +507,8 @@ mod tests {
             "ftp://relay.example.com",
             "file:///etc/passwd",
             "https://",
+            "https://relay.example.com?tenant=1",
+            "https://relay.example.com#fragment",
         ] {
             assert!(validate_relay_url(bad).is_err(), "expected {bad:?} to be rejected");
         }
