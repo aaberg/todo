@@ -25,7 +25,7 @@ use date::parse_relative_due_date;
 use db::Database;
 use display::{print_list, print_log};
 use event::{EventPayload, EventType};
-use model::{fold_events, resolve_display_id, sort_for_display, with_display_ids, Todo};
+use model::{fold_events, prepare_for_display, resolve_display_id, sort_for_display, with_display_ids, Todo};
 
 fn main() {
     if let Err(error) = run() {
@@ -48,13 +48,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::List { all } => {
-            let mut display = with_display_ids(todos);
-            if !all {
-                display.retain(|(_, t)| {
-                    t.completed_on.is_none() || t.completed_on == Some(today)
-                });
-            }
-            sort_for_display(&mut display, today);
+            let display = prepare_for_display(todos, today, all);
             print_list(&display, today);
         }
         Commands::Add { description, due } => {

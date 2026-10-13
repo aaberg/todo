@@ -142,6 +142,18 @@ pub fn todo_order_within_group(todo: &Todo, today: NaiveDate) -> u8 {
     }
 }
 
+/// Prepare todos for listing: sort the complete set, assign canonical display
+/// IDs, then optionally apply the default list's visibility filter. The complete
+/// sorted set is the canonical ID mapping shared with the ID-based commands.
+pub fn prepare_for_display(todos: Vec<Todo>, today: NaiveDate, all: bool) -> Vec<(i64, Todo)> {
+    let mut display = with_display_ids(todos);
+    sort_for_display(&mut display, today);
+    if !all {
+        display.retain(|(_, t)| t.completed_on.is_none() || t.completed_on == Some(today));
+    }
+    display
+}
+
 /// Sort todos for display: by group, then within-group order, then due date, then creation.
 pub fn sort_for_display(todos: &mut [(i64, Todo)], today: NaiveDate) {
     todos.sort_by_key(|(_, todo)| {
@@ -411,6 +423,71 @@ mod tests {
         ];
         assert_eq!(resolve_display_id(2, &todos), Some(uuid_b));
         assert_eq!(resolve_display_id(99, &todos), None);
+    }
+
+    #[test]
+    fn default_list_filter_keeps_canonical_ids() {
+        let device = Uuid::new_v4();
+        let hidden_uuid = Uuid::new_v4();
+        let visible_uuid = Uuid::new_v4();
+        let today = date("2026-10-08");
+        let events = vec![
+            create_event(device, hidden_uuid, "Old task", "2026-10-08", "2026-10-06T10:00:00Z"),
+            update_event(
+                device,
+                hidden_uuid,
+                "2026-10-06T11:00:00Z",
+                EventPayload::Update {
+                    description: None,
+                    due_date: None,
+                    completed_on: Some(Some(date("2026-10-07"))),
+                },
+            ),
+            create_event(device, visible_uuid, "Buy milk", "2026-10-09", "2026-10-06T12:00:00Z"),
+        ];
+        let todos = fold_events(&events);
+
+        let all_list = prepare_for_display(todos.clone(), today, true);
+        let default_list = prepare_for_display(todos, today, false);
+
+        assert_eq!(default_list.len(), 1);
+        assert_eq!(default_list[0].0, 2);
+        assert_eq!(default_list[0].1.uuid, visible_uuid);
+        assert_eq!(resolve_display_id(2, &default_list), Some(visible_uuid));
+        assert_eq!(resolve_display_id(2, &all_list), Some(visible_uuid));
+        assert_eq!(resolve_display_id(1, &all_list), Some(hidden_uuid));
+    }
+
+    #[test]
+    fn completed_today_todo_stays_visible_with_canonical_id() {
+        let device = Uuid::new_v4();
+        let done_uuid = Uuid::new_v4();
+        let open_uuid = Uuid::new_v4();
+        let today = date("2026-10-08");
+        let events = vec![
+            create_event(device, done_uuid, "Done today", "2026-10-08", "2026-10-06T10:00:00Z"),
+            update_event(
+                device,
+                done_uuid,
+                "2026-10-08T09:00:00Z",
+                EventPayload::Update {
+                    description: None,
+                    due_date: None,
+                    completed_on: Some(Some(today)),
+                },
+            ),
+            create_event(device, open_uuid, "Open", "2026-10-08", "2026-10-06T12:00:00Z"),
+        ];
+        let todos = fold_events(&events);
+
+        let all_list = prepare_for_display(todos.clone(), today, true);
+        let default_list = prepare_for_display(todos, today, false);
+
+        assert_eq!(default_list.len(), 2);
+        assert_eq!(resolve_display_id(1, &default_list), Some(open_uuid));
+        assert_eq!(resolve_display_id(2, &default_list), Some(done_uuid));
+        assert_eq!(resolve_display_id(1, &all_list), Some(open_uuid));
+        assert_eq!(resolve_display_id(2, &all_list), Some(done_uuid));
     }
 
     #[test]
