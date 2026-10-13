@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Public routes — no auth required
     let public = Router::new()
+        .route("/", get(api::status_page))
         .route("/health", get(api::health))
         .route("/auth/login", get(api::auth_login))
         .route("/auth/callback", get(api::auth_callback))
