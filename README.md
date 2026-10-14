@@ -112,21 +112,46 @@ relay.yourdomain.com {
 ### Deploy with Docker Compose
 
 An alternative to the systemd setup above: build the image and run it with
-Docker Compose. The container binds to `127.0.0.1:3000` on the host, so Caddy
-(or any other TLS reverse proxy) still terminates HTTPS in front of it.
+Docker Compose. For example, save this as `compose.yaml` anywhere on the VPS
+(the build context must be the repository root, so build the image from a
+checkout first if needed):
+
+```yaml
+services:
+  relay:
+    image: todo-relay
+    restart: unless-stopped
+    env_file: relay/.env
+    environment:
+      # Listen on all interfaces inside the container; publish only to the
+      # host loopback so Caddy still terminates TLS in front.
+      TODO_RELAY_BIND: 0.0.0.0:3000
+      TODO_RELAY_DATABASE: /var/lib/todo-relay/relay.db
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - /var/lib/todo-relay:/var/lib/todo-relay
+```
+
+The image is built from the repository (the Dockerfile lives at
+`relay/Dockerfile`):
 
 ```bash
+git clone https://github.com/aaberg/todo
+cd todo
+docker build -f relay/Dockerfile -t todo-relay .
+
 cp relay/.env.example relay/.env
 # Edit relay/.env: set TODO_RELAY_PUBLIC_URL and the TODO_OIDC_* values
-# (TODO_RELAY_BIND and TODO_RELAY_DATABASE are set by the compose file)
+# (TODO_RELAY_BIND and TODO_RELAY_DATABASE are overridden by the compose file)
 
-# The container runs as the dedicated user `todo-relay` with a fixed UID (10000).
+# The container runs as the user `todo-relay` with a fixed UID (10000).
 # The host data directory must be writable by that UID:
 sudo mkdir -p /var/lib/todo-relay
 sudo chown 10000:10000 /var/lib/todo-relay
 
-docker compose -f relay/compose.yaml up -d --build
-docker compose -f relay/compose.yaml logs -f
+docker compose up -d
+docker compose logs -f
 ```
 
 The SQLite database is stored at `/var/lib/todo-relay/relay.db` on the host
