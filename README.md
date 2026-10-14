@@ -7,6 +7,33 @@ truth — current state is derived by folding events. A lightweight relay server
 syncs the event log across machines. Last-write-wins by timestamp; all devices
 converge to the same state.
 
+## Install
+
+### One-liner (Linux and macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aaberg/todo/main/install.sh | sh
+```
+
+The script detects your OS and architecture, downloads the matching binary
+from the [latest release](https://github.com/aaberg/todo/releases), verifies
+its SHA256 checksum, and installs it to `~/.local/bin` (or `/usr/local/bin`
+when run as root). Options:
+
+```bash
+# install a specific release
+... | sh -s -- --version 0.1.0
+
+# install to a custom directory
+... | sh -s -- --to /usr/local/bin
+```
+
+### Other options
+
+- Download a binary from the [releases page](https://github.com/aaberg/todo/releases)
+  (static Linux x86_64, universal macOS, Windows x86_64)
+- Build from source: `cargo install --git https://github.com/aaberg/todo todo`
+
 ## Quick start
 
 ### CLI
