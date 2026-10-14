@@ -77,6 +77,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 },
             )?;
             println!("Added todo for {}.", due_date.format("%Y-%m-%d"));
+            let todos = fold_events(&db.all_events()?);
+            let display = prepare_for_display(todos, today, false);
+            print_list(&display, today);
         }
         Commands::Edit { id, description } => {
             let mut display = with_display_ids(todos);
