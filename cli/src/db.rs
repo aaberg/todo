@@ -10,6 +10,82 @@ pub struct Database {
     connection: Connection,
 }
 
+/// The immutable dataset binding: which relay/account pair owns this local
+/// event log. Credentials are temporary; this survives logout and expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncBinding {
+    pub relay_url: String,
+    pub user_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncBindingState {
+    Absent,
+    Bound(SyncBinding),
+    Corrupt,
+}
+
+#[derive(Debug)]
+pub enum SyncBindingError {
+    Db(rusqlite::Error),
+    /// The dataset is already bound to a different relay/account pair.
+    Mismatch(SyncBinding),
+    /// Binding metadata exists but is incomplete or invalid.
+    Corrupt,
+}
+
+impl std::fmt::Display for SyncBindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncBindingError::Db(e) => write!(f, "database error: {e}"),
+            SyncBindingError::Mismatch(b) => write!(
+                f,
+                "this todo database is already bound to relay {} as user {}; \
+                 it cannot be synced with a different relay or account",
+                b.relay_url, b.user_id
+            ),
+            SyncBindingError::Corrupt => write!(
+                f,
+                "the stored sync binding is incomplete or corrupt; \
+                 refusing to sync or log in. Local todo commands remain usable"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SyncBindingError {}
+
+pub const SYNC_BINDING_RELAY_KEY: &str = "sync_relay_url";
+pub const SYNC_BINDING_USER_KEY: &str = "sync_user_id";
+
+fn read_binding_tx(tx: &rusqlite::Transaction<'_>) -> Result<SyncBindingState, SyncBindingError> {
+    let read = |key: &str| -> rusqlite::Result<Option<String>> {
+        let result = tx.query_row(
+            "SELECT value FROM sync_state WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    };
+    let relay = read(SYNC_BINDING_RELAY_KEY).map_err(SyncBindingError::Db)?;
+    let user = read(SYNC_BINDING_USER_KEY).map_err(SyncBindingError::Db)?;
+    match (relay, user) {
+        (None, None) => Ok(SyncBindingState::Absent),
+        (Some(relay), Some(user)) => match Uuid::parse_str(&user) {
+            Ok(user_id) if !relay.trim().is_empty() => Ok(SyncBindingState::Bound(SyncBinding {
+                relay_url: relay,
+                user_id,
+            })),
+            _ => Ok(SyncBindingState::Corrupt),
+        },
+        _ => Ok(SyncBindingState::Corrupt),
+    }
+}
+
 impl Database {
     pub fn open(path: PathBuf) -> rusqlite::Result<Self> {
         let connection = Connection::open(path)?;
@@ -20,6 +96,7 @@ impl Database {
     }
 
     /// Open an in-memory database (used by tests).
+    #[cfg(test)]
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let connection = Connection::open_in_memory()?;
         let mut database = Self { connection };
@@ -29,7 +106,8 @@ impl Database {
 
     fn initialize(&mut self) -> rusqlite::Result<()> {
         // Clean slate: drop legacy todos table if it exists (Phase 1 artifact)
-        self.connection.execute_batch("DROP TABLE IF EXISTS todos;")?;
+        self.connection
+            .execute_batch("DROP TABLE IF EXISTS todos;")?;
 
         self.connection.execute_batch(
             "
@@ -94,9 +172,8 @@ impl Database {
     /// Returns true if the event was newly inserted, false if an event with
     /// the same event_id already existed (dedup).
     pub fn append_event(&mut self, event: &Event) -> rusqlite::Result<bool> {
-        let payload = serde_json::to_string(&event.payload).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-        })?;
+        let payload = serde_json::to_string(&event.payload)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         self.connection.execute(
             "INSERT OR IGNORE INTO events (event_id, device_id, timestamp, todo_uuid, event_type, payload)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -138,14 +215,18 @@ impl Database {
                 device_id: parse_uuid(&device_id)?,
                 timestamp: parse_datetime(&timestamp)?,
                 todo_uuid: parse_uuid(&todo_uuid)?,
-                event_type: EventType::from_str(&event_type)
-                    .ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(
-                        4, rusqlite::types::Type::Text,
+                event_type: EventType::from_str(&event_type).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
                         format!("unknown event_type: {event_type}").into(),
-                    ))?,
+                    )
+                })?,
                 payload: serde_json::from_str(&payload).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        5, rusqlite::types::Type::Text, Box::new(e),
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
                     )
                 })?,
             });
@@ -188,14 +269,18 @@ impl Database {
                 device_id: parse_uuid(&device_id)?,
                 timestamp: parse_datetime(&timestamp)?,
                 todo_uuid: parse_uuid(&todo_uuid)?,
-                event_type: EventType::from_str(&event_type)
-                    .ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(
-                        5, rusqlite::types::Type::Text,
+                event_type: EventType::from_str(&event_type).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
                         format!("unknown event_type: {event_type}").into(),
-                    ))?,
+                    )
+                })?,
                 payload: serde_json::from_str(&payload).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        6, rusqlite::types::Type::Text, Box::new(e),
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
                     )
                 })?,
             };
@@ -231,14 +316,18 @@ impl Database {
                 device_id: parse_uuid(&device_id)?,
                 timestamp: parse_datetime(&timestamp)?,
                 todo_uuid: parse_uuid(&todo_uuid)?,
-                event_type: EventType::from_str(&event_type)
-                    .ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(
-                        4, rusqlite::types::Type::Text,
+                event_type: EventType::from_str(&event_type).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
                         format!("unknown event_type: {event_type}").into(),
-                    ))?,
+                    )
+                })?,
                 payload: serde_json::from_str(&payload).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        5, rusqlite::types::Type::Text, Box::new(e),
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
                     )
                 })?,
             });
@@ -267,6 +356,142 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    // ─── Sync binding ───────────────────────────────────────────────
+
+    /// Read the dataset's sync binding (relay URL + verified user UUID).
+    /// `Absent` means no binding keys exist at all; `Corrupt` means some
+    /// binding metadata exists but is not a complete, valid pair.
+    pub fn sync_binding(&self) -> rusqlite::Result<SyncBindingState> {
+        let relay = self.get_state(SYNC_BINDING_RELAY_KEY)?;
+        let user = self.get_state(SYNC_BINDING_USER_KEY)?;
+        match (relay, user) {
+            (None, None) => Ok(SyncBindingState::Absent),
+            (Some(relay), Some(user)) => match Uuid::parse_str(&user) {
+                Ok(user_id) if !relay.trim().is_empty() => {
+                    Ok(SyncBindingState::Bound(SyncBinding {
+                        relay_url: relay,
+                        user_id,
+                    }))
+                }
+                _ => Ok(SyncBindingState::Corrupt),
+            },
+            _ => Ok(SyncBindingState::Corrupt),
+        }
+    }
+
+    /// Whether the dataset has evidence of a prior sync relationship even
+    /// without a binding (legacy upgrade detection).
+    pub fn has_legacy_sync_evidence(&self) -> rusqlite::Result<bool> {
+        Ok(self.get_state("last_pulled_seq")?.is_some()
+            || self.get_state("last_pushed_rowid")?.is_some())
+    }
+
+    /// Atomically establish or verify the dataset binding in one SQLite
+    /// transaction:
+    /// - unbound dataset -> create both binding fields (cursor left as-is
+    ///   so offline-created events sync; callers must ensure eligibility)
+    /// - exact match -> no change
+    /// - mismatch or corrupt binding -> error, no mutation
+    ///
+    /// Keep HTTP requests outside this transaction.
+    pub fn bind_or_verify_sync(
+        &mut self,
+        relay_url: &str,
+        user_id: Uuid,
+    ) -> Result<SyncBinding, SyncBindingError> {
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(SyncBindingError::Db)?;
+        let existing = read_binding_tx(&tx)?;
+        match existing {
+            SyncBindingState::Absent => {
+                tx.execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                    params![SYNC_BINDING_RELAY_KEY, relay_url],
+                )
+                .map_err(SyncBindingError::Db)?;
+                tx.execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                    params![SYNC_BINDING_USER_KEY, user_id.to_string()],
+                )
+                .map_err(SyncBindingError::Db)?;
+                tx.commit().map_err(SyncBindingError::Db)?;
+                Ok(SyncBinding {
+                    relay_url: relay_url.to_string(),
+                    user_id,
+                })
+            }
+            SyncBindingState::Bound(binding) => {
+                if binding.relay_url == relay_url && binding.user_id == user_id {
+                    tx.commit().map_err(SyncBindingError::Db)?;
+                    Ok(binding)
+                } else {
+                    tx.rollback().ok();
+                    Err(SyncBindingError::Mismatch(binding))
+                }
+            }
+            SyncBindingState::Corrupt => {
+                tx.rollback().ok();
+                Err(SyncBindingError::Corrupt)
+            }
+        }
+    }
+
+    /// Adopt the verified identity of a legacy dataset (prior sync history
+    /// but no recorded binding) as its first binding, resetting the
+    /// previously unscoped pull cursor to 0 once, in the same transaction.
+    /// Replay from the same account is safe: events dedupe by event_id.
+    pub fn adopt_legacy_sync_binding(
+        &mut self,
+        relay_url: &str,
+        user_id: Uuid,
+    ) -> Result<SyncBinding, SyncBindingError> {
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(SyncBindingError::Db)?;
+        let existing = read_binding_tx(&tx)?;
+        match existing {
+            SyncBindingState::Absent => {
+                tx.execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                    params![SYNC_BINDING_RELAY_KEY, relay_url],
+                )
+                .map_err(SyncBindingError::Db)?;
+                tx.execute(
+                    "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                    params![SYNC_BINDING_USER_KEY, user_id.to_string()],
+                )
+                .map_err(SyncBindingError::Db)?;
+                // The old cursor was not scoped to this account; replay from
+                // the start. Dedup by event_id makes the replay safe.
+                tx.execute(
+                    "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_pulled_seq', '0')",
+                    [],
+                )
+                .map_err(SyncBindingError::Db)?;
+                tx.commit().map_err(SyncBindingError::Db)?;
+                Ok(SyncBinding {
+                    relay_url: relay_url.to_string(),
+                    user_id,
+                })
+            }
+            SyncBindingState::Bound(binding) => {
+                tx.rollback().ok();
+                if binding.relay_url == relay_url && binding.user_id == user_id {
+                    Ok(binding)
+                } else {
+                    Err(SyncBindingError::Mismatch(binding))
+                }
+            }
+            SyncBindingState::Corrupt => {
+                tx.rollback().ok();
+                Err(SyncBindingError::Corrupt)
+            }
+        }
     }
 
     /// Convenience: append an event in a single call.
@@ -300,8 +525,8 @@ fn parse_datetime(value: &str) -> rusqlite::Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use crate::model::fold_events;
+    use chrono::NaiveDate;
 
     fn date(value: &str) -> NaiveDate {
         NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap()
@@ -309,7 +534,9 @@ mod tests {
 
     fn test_database() -> Database {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .unwrap();
         let mut database = Database { connection };
         database.initialize().unwrap();
         database
@@ -498,10 +725,13 @@ mod tests {
     #[test]
     fn legacy_todos_table_is_dropped() {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .unwrap();
         // Simulate a legacy database with the old todos table
-        connection.execute_batch(
-            "CREATE TABLE todos (
+        connection
+            .execute_batch(
+                "CREATE TABLE todos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 description TEXT NOT NULL,
                 due_date TEXT NOT NULL,
@@ -509,8 +739,8 @@ mod tests {
             );
             INSERT INTO todos (description, due_date) VALUES ('old', '2026-10-08');
             ",
-        )
-        .unwrap();
+            )
+            .unwrap();
 
         let mut db = Database { connection };
         db.initialize().unwrap();
@@ -535,6 +765,140 @@ mod tests {
         assert_eq!(db.get_state("key").unwrap(), Some("value".to_owned()));
         db.set_state("key", "updated").unwrap();
         assert_eq!(db.get_state("key").unwrap(), Some("updated".to_owned()));
+    }
+
+    #[test]
+    fn binding_roundtrip_and_states() {
+        let mut db = test_database();
+        assert_eq!(db.sync_binding().unwrap(), SyncBindingState::Absent);
+        assert!(!db.has_legacy_sync_evidence().unwrap());
+
+        let user = Uuid::new_v4();
+        let bound = db
+            .bind_or_verify_sync("https://relay.example.com", user)
+            .unwrap();
+        assert_eq!(bound.user_id, user);
+        assert_eq!(
+            db.sync_binding().unwrap(),
+            SyncBindingState::Bound(SyncBinding {
+                relay_url: "https://relay.example.com".to_string(),
+                user_id: user,
+            })
+        );
+
+        // Exact match verifies without change.
+        db.bind_or_verify_sync("https://relay.example.com", user)
+            .unwrap();
+        assert_eq!(
+            db.sync_binding().unwrap().clone(),
+            SyncBindingState::Bound(SyncBinding {
+                relay_url: "https://relay.example.com".to_string(),
+                user_id: user,
+            })
+        );
+
+        // Different user on same relay: rejected, no mutation.
+        let err = db
+            .bind_or_verify_sync("https://relay.example.com", Uuid::new_v4())
+            .unwrap_err();
+        assert!(matches!(err, SyncBindingError::Mismatch(_)));
+        // Different relay with same user: rejected, no mutation.
+        let err = db
+            .bind_or_verify_sync("https://other.example.com", user)
+            .unwrap_err();
+        assert!(matches!(err, SyncBindingError::Mismatch(_)));
+        assert!(matches!(
+            db.sync_binding().unwrap(),
+            SyncBindingState::Bound(_)
+        ));
+    }
+
+    #[test]
+    fn first_binding_preserves_events_and_cursor() {
+        let mut db = test_database();
+        db.emit(
+            Uuid::new_v4(),
+            EventType::Create,
+            EventPayload::Create {
+                description: "offline todo".to_string(),
+                due_date: date("2026-10-08"),
+            },
+        )
+        .unwrap();
+        db.set_state("last_pulled_seq", "5").unwrap();
+
+        db.bind_or_verify_sync("https://relay.example.com", Uuid::new_v4())
+            .unwrap();
+
+        // Events retained; cursor untouched (not legacy: it was never used
+        // for a different account).
+        assert_eq!(db.all_events().unwrap().len(), 1);
+        assert_eq!(
+            db.get_state("last_pulled_seq").unwrap().as_deref(),
+            Some("5")
+        );
+    }
+
+    #[test]
+    fn corrupt_binding_fails_closed() {
+        let mut db = test_database();
+        db.set_state(SYNC_BINDING_RELAY_KEY, "https://relay.example.com")
+            .unwrap();
+        // user key missing -> corrupt
+        assert_eq!(db.sync_binding().unwrap(), SyncBindingState::Corrupt);
+        assert!(matches!(
+            db.bind_or_verify_sync("https://relay.example.com", Uuid::new_v4()),
+            Err(SyncBindingError::Corrupt)
+        ));
+        // invalid UUID -> corrupt, and no mutation
+        db.set_state(SYNC_BINDING_USER_KEY, "not-a-uuid").unwrap();
+        assert_eq!(db.sync_binding().unwrap(), SyncBindingState::Corrupt);
+        assert!(matches!(
+            db.bind_or_verify_sync("https://relay.example.com", Uuid::new_v4()),
+            Err(SyncBindingError::Corrupt)
+        ));
+        assert_eq!(
+            db.get_state(SYNC_BINDING_USER_KEY).unwrap().as_deref(),
+            Some("not-a-uuid")
+        );
+    }
+
+    #[test]
+    fn legacy_adoption_resets_cursor_once() {
+        let mut db = test_database();
+        db.set_state("last_pulled_seq", "3").unwrap();
+        assert!(db.has_legacy_sync_evidence().unwrap());
+
+        let user = Uuid::new_v4();
+        db.adopt_legacy_sync_binding("https://relay.example.com", user)
+            .unwrap();
+        assert_eq!(
+            db.get_state("last_pulled_seq").unwrap().as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            db.sync_binding().unwrap(),
+            SyncBindingState::Bound(SyncBinding {
+                relay_url: "https://relay.example.com".to_string(),
+                user_id: user,
+            })
+        );
+
+        // Second adoption of the same identity is idempotent and does not
+        // reset a cursor that has since advanced.
+        db.set_state("last_pulled_seq", "7").unwrap();
+        db.adopt_legacy_sync_binding("https://relay.example.com", user)
+            .unwrap();
+        assert_eq!(
+            db.get_state("last_pulled_seq").unwrap().as_deref(),
+            Some("7")
+        );
+
+        // A different identity is rejected.
+        assert!(matches!(
+            db.adopt_legacy_sync_binding("https://relay.example.com", Uuid::new_v4()),
+            Err(SyncBindingError::Mismatch(_))
+        ));
     }
 
     #[test]
@@ -930,5 +1294,4 @@ mod tests {
         assert_eq!(shared_todo.description, "A edited");
         assert_eq!(shared_todo.completed_on, Some(date("2026-10-07")));
     }
-
 }
