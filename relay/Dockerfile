@@ -16,7 +16,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --system --home /var/lib/todo-relay --create-home todo-relay
+# Fixed UID so host bind mounts can be chowned predictably
+RUN useradd --uid 10000 --system --home /var/lib/todo-relay --create-home todo-relay
 
 COPY --from=build /build/target/release/todo-relay /usr/local/bin/todo-relay
 

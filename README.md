@@ -119,13 +119,20 @@ Docker Compose. The container binds to `127.0.0.1:3000` on the host, so Caddy
 cp relay/.env.example relay/.env
 # Edit relay/.env: set TODO_RELAY_PUBLIC_URL and the TODO_OIDC_* values
 # (TODO_RELAY_BIND and TODO_RELAY_DATABASE are set by the compose file)
+
+# The container runs as the dedicated user `todo-relay` with a fixed UID (10000).
+# The host data directory must be writable by that UID:
+sudo mkdir -p /var/lib/todo-relay
+sudo chown 10000:10000 /var/lib/todo-relay
+
 docker compose -f relay/compose.yaml up -d --build
 docker compose -f relay/compose.yaml logs -f
 ```
 
-The SQLite database is stored in the `relay-data` Docker volume. Configuration
-is read from `relay/.env`, which is excluded from the image build via
-`.dockerignore`, so secrets never end up inside the image.
+The SQLite database is stored at `/var/lib/todo-relay/relay.db` on the host
+(bind-mounted into the container). Configuration is read from `relay/.env`,
+which is excluded from the image build via `.dockerignore`, so secrets never
+end up inside the image.
 
 ### Authelia setup
 
