@@ -136,6 +136,65 @@ relay.yourdomain.com {
 }
 ```
 
+### Deploy with Docker Compose
+
+An alternative to the systemd setup above: build the image and run it with
+Docker Compose. For example, save this as `compose.yaml` anywhere on the VPS
+(the build context must be the repository root, so build the image from a
+checkout first if needed):
+
+```yaml
+services:
+  relay:
+    image: todo-relay
+    restart: unless-stopped
+    env_file: relay/.env
+    environment:
+      # Listen on all interfaces inside the container; publish only to the
+      # host loopback so Caddy still terminates TLS in front.
+      TODO_RELAY_BIND: 0.0.0.0:3000
+      TODO_RELAY_DATABASE: /var/lib/todo-relay/todo.db
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # Host path (left side): where the database lives on your system.
+      # Replace /path/to/todo-data with the directory you want, e.g.
+      # /var/lib/todo-relay or /home/youruser/todo-relay-data.
+      - /path/to/todo-data:/var/lib/todo-relay
+```
+
+To store the database at a host path of your choosing, set the **left side** of
+the volumes entry to that host directory — it is created if missing (or create
+it yourself). The **right side** must stay `/var/lib/todo-relay`, matching
+`TODO_RELAY_DATABASE` inside the container. The database file itself will be at
+`<host path>/todo.db`.
+
+The image is built from the repository (the Dockerfile lives at
+`relay/Dockerfile`):
+
+```bash
+git clone https://github.com/aaberg/todo
+cd todo
+docker build -f relay/Dockerfile -t todo-relay .
+
+cp relay/.env.example relay/.env
+# Edit relay/.env: set TODO_RELAY_PUBLIC_URL and the TODO_OIDC_* values
+# (TODO_RELAY_BIND and TODO_RELAY_DATABASE are overridden by the compose file)
+
+# The container runs as the user `todo-relay` with a fixed UID (10000).
+# The host data directory must exist and be writable by that UID —
+# use the same path you put on the left side of the volumes entry:
+sudo mkdir -p /path/to/todo-data
+sudo chown 10000:10000 /path/to/todo-data
+
+docker compose up -d
+docker compose logs -f
+```
+
+The SQLite database ends up at `/path/to/todo-data/todo.db` on the host.
+Configuration is read from `relay/.env`, which is excluded from the image build
+via `.dockerignore`, so secrets never end up inside the image.
+
 ### Authelia setup
 
 Register an OIDC client in your Authelia `configuration.yml`:
