@@ -105,6 +105,22 @@ sudo systemctl enable --now todo-relay
 Caddy (TLS) config is in `relay/Caddyfile`. Point `relay.yourdomain.com` at the VPS,
 reverse proxy to `127.0.0.1:3000`.
 
+## Release Procedure
+
+The version lives in `[workspace.package]` in the root `Cargo.toml` and is the
+single source of truth. All three crates inherit it via `version.workspace = true`
+— never pin an individual crate's version.
+
+1. Bump `version` in the root `Cargo.toml`.
+2. Run `cargo update --workspace` and commit `Cargo.toml` + `Cargo.lock` **together**.
+   CI builds with `--locked`, so a stale lockfile fails the build with
+   `cannot update the lock file ... because --locked was passed`.
+3. Tag `<x.y.z>` matching the manifest version (no `v` prefix — releases in this
+   repo use bare version tags, e.g. `0.1.3`) and push the tag.
+4. Publish a GitHub release for that tag — this triggers `.github/workflows/release.yml`,
+   which builds binaries for Linux/macOS/Windows, the Docker image, and fails if
+   the tag does not match every workspace package's version.
+
 ## Key Conventions
 
 - **No `todos` table.** Everything goes through `events`. The fold is the only way
