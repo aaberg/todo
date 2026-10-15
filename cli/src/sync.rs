@@ -246,10 +246,10 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
     let (relay_url, token) = config.require_auth().map_err(SyncError::Config)?;
     let relay_url = canonical_relay_url(relay_url)?;
 
-    // Enforce the dataset binding before any pull, push, or cursor change.
-    // Stored credentials can be stale, copied, or manually edited, so the
-    // identity is re-verified against the relay on every sync.
-    let me = verify_identity(&relay_url, token)?;
+    // Enforce the dataset binding before any pull, push, cursor change, or
+    // network request. Checking the binding's relay URL locally first also
+    // means a substituted relay in config.toml is rejected before the active
+    // token is sent anywhere.
     match db.sync_binding().map_err(SyncError::Db)? {
         SyncBindingState::Corrupt => {
             return Err(SyncError::Binding(SyncBindingError::Corrupt));
@@ -257,6 +257,13 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
         SyncBindingState::Bound(binding) if binding.relay_url != relay_url => {
             return Err(SyncError::Binding(SyncBindingError::Mismatch(binding)));
         }
+        _ => {}
+    }
+
+    // Re-verify the identity on every sync: stored credentials can be stale,
+    // copied, or manually edited.
+    let me = verify_identity(&relay_url, token)?;
+    match db.sync_binding().map_err(SyncError::Db)? {
         SyncBindingState::Bound(binding) if binding.user_id != me.user_id => {
             return Err(SyncError::Binding(SyncBindingError::Mismatch(binding)));
         }
@@ -272,6 +279,9 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
                 db.bind_or_verify_sync(&relay_url, me.user_id)
                     .map_err(SyncError::Binding)?;
             }
+        }
+        SyncBindingState::Corrupt => {
+            return Err(SyncError::Binding(SyncBindingError::Corrupt));
         }
     }
 
@@ -614,6 +624,48 @@ mod tests {
         assert_eq!(
             canonical_relay_url("  https://relay.example.com/  ").unwrap(),
             "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn canonical_relay_url_preserves_ipv6_brackets() {
+        assert_eq!(
+            canonical_relay_url("http://[::1]:8080").unwrap(),
+            "http://[::1]:8080"
+        );
+        assert_eq!(canonical_relay_url("http://[::1]/").unwrap(), "http://[::1]");
+        assert_eq!(
+            canonical_relay_url("http://[2001:db8::1]:3000/relay/").unwrap(),
+            "http://[2001:db8::1]:3000/relay"
+        );
+        // The canonical form must be a usable request base for loopback relays.
+        let canonical = canonical_relay_url("http://[::1]:8080/").unwrap();
+        let parsed = reqwest::Url::parse(&format!("{canonical}/me")).unwrap();
+        assert_eq!(parsed.host_str(), Some("[::1]"));
+        assert_eq!(parsed.port(), Some(8080));
+    }
+
+    #[test]
+    fn canonical_relay_url_normalizes_default_ports() {
+        // An explicitly supplied scheme-default port must not make the same
+        // relay look different from the spelling without the port.
+        assert_eq!(
+            canonical_relay_url("http://relay.example.com:80").unwrap(),
+            canonical_relay_url("http://relay.example.com").unwrap()
+        );
+        assert_eq!(
+            canonical_relay_url("https://relay.example.com:443/").unwrap(),
+            canonical_relay_url("https://relay.example.com").unwrap()
+        );
+        // Non-default ports are significant and preserved.
+        assert_eq!(
+            canonical_relay_url("http://relay.example.com:8080").unwrap(),
+            "http://relay.example.com:8080"
+        );
+        // A non-default port for the scheme stays distinct.
+        assert_ne!(
+            canonical_relay_url("https://relay.example.com:80").unwrap(),
+            canonical_relay_url("https://relay.example.com").unwrap()
         );
     }
 
