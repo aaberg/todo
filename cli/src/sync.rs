@@ -128,10 +128,13 @@ pub fn login(db: &mut Database, relay_url: &str) -> Result<(), SyncError> {
 
 /// Check the candidate session identity against the dataset binding before
 /// credentials are persisted. For an already-bound dataset this is an exact
-/// match-or-fail. For an unbound dataset with evidence of a prior sync
-/// relationship (legacy upgrade), the previously configured session — if
-/// still verifiable — establishes the binding first, and the candidate must
-/// match it. If the legacy identity cannot be verified, fail closed.
+/// match-or-fail. For an unbound dataset, any evidence of a prior configured
+/// sync relationship (cursor keys or stored credentials — an older CLI could
+/// log in without ever completing a sync) makes it a legacy upgrade: the
+/// previously configured session — if still verifiable — establishes the
+/// binding first, and the candidate must match it. Without evidence it is a
+/// genuinely unbound dataset and the candidate establishes the first binding.
+/// If legacy evidence exists but cannot be verified, fail closed.
 fn verify_or_bind_on_login(
     db: &mut Database,
     relay_url: &str,
@@ -144,16 +147,16 @@ fn verify_or_bind_on_login(
             Ok(())
         }
         SyncBindingState::Absent => {
-            if !db.has_legacy_sync_evidence().map_err(SyncError::Db)? {
-                // Genuinely unbound, never-synced dataset: first binding.
+            let config = Config::load();
+            if !has_prior_sync_relationship(db, &config)? {
+                // Genuinely unbound, never-configured dataset: first binding.
                 // Offline-created events are retained and will sync.
                 db.bind_or_verify_sync(relay_url, user_id)
                     .map_err(SyncError::Binding)?;
                 return Ok(());
             }
-            // Legacy dataset with prior sync history: ownership must come
-            // from the previously configured session, not the new token.
-            let config = Config::load();
+            // Legacy dataset: ownership must come from the previously
+            // configured session, not the new token.
             if let (Some(config_url), Some(token)) = (&config.sync_url, &config.session_token)
                 && let Ok(config_relay) = canonical_relay_url(config_url)
                 && let Ok(existing_me) = verify_identity(&config_relay, token)
@@ -167,6 +170,16 @@ fn verify_or_bind_on_login(
             Err(SyncError::LegacyMigrationRequired)
         }
     }
+}
+
+/// Whether an unbound dataset shows evidence of a prior configured sync
+/// relationship. Cursor keys in the database are one form; stored relay
+/// credentials in the config file are another — an older CLI could complete a
+/// login without ever syncing, leaving credentials but no cursors. Either
+/// means ownership cannot be established from a new candidate token alone.
+fn has_prior_sync_relationship(db: &Database, config: &Config) -> Result<bool, SyncError> {
+    Ok(db.has_legacy_sync_evidence().map_err(SyncError::Db)?
+        || config.session_token.is_some())
 }
 
 /// Build the relay login URL with the CLI callback parameter.
@@ -269,10 +282,13 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
         }
         SyncBindingState::Bound(_) => {}
         SyncBindingState::Absent => {
+            // Unbound dataset. The /me identity verified above comes from the
+            // configured session itself (there is no separate candidate
+            // token on this path), so binding it is always adopting the
+            // verified configured identity — never a guess. With cursor
+            // evidence it is a legacy upgrade: adopt the identity and reset
+            // the previously unscoped cursor once.
             if db.has_legacy_sync_evidence().map_err(SyncError::Db)? {
-                // Legacy dataset with a prior sync relationship: adopt the
-                // identity that just verified via /me as the first binding
-                // and reset the previously unscoped cursor once.
                 db.adopt_legacy_sync_binding(&relay_url, me.user_id)
                     .map_err(SyncError::Binding)?;
             } else {
@@ -698,6 +714,40 @@ mod tests {
 
     fn test_database() -> Database {
         Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn stored_credentials_alone_are_prior_sync_evidence() {
+        let db = test_database();
+
+        // No cursors, no stored credentials: eligible for first binding.
+        let config = Config::default();
+        assert!(!has_prior_sync_relationship(&db, &config).unwrap());
+
+        // Cursor keys alone are evidence.
+        let mut db = test_database();
+        db.set_state("last_pulled_seq", "3").unwrap();
+        assert!(has_prior_sync_relationship(&db, &config).unwrap());
+
+        // Stored credentials alone are evidence too: an older CLI could log
+        // in without ever completing a sync, leaving no cursors behind.
+        let db = test_database();
+        let config = Config {
+            sync_url: Some("https://relay.example.com".to_string()),
+            session_token: Some("token".to_string()),
+            device_id: None,
+        };
+        assert!(has_prior_sync_relationship(&db, &config).unwrap());
+
+        // A sync_url without a token (e.g. after logout) is not, on its own,
+        // credentials — but logout preserves cursors, so the cursor check
+        // still covers that case for datasets that actually synced.
+        let config = Config {
+            sync_url: Some("https://relay.example.com".to_string()),
+            session_token: None,
+            device_id: None,
+        };
+        assert!(!has_prior_sync_relationship(&db, &config).unwrap());
     }
 
     #[test]
