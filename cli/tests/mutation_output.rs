@@ -98,11 +98,12 @@ fn undone_prints_confirmation_and_updated_list() {
         stdout.contains("Marked todo 2 as not done."),
         "got:\n{stdout}"
     );
-    // The refreshed list must show the todo back to pending: no completed entry.
+    // The refreshed list must show both todos back to pending.
     assert!(
         !stdout.contains("[x]"),
         "expected no completed todo in the refreshed list; got:\n{stdout}"
     );
+    assert_list_contains(&home, &stdout, &["[ ] 1 todo 1", "[ ] 2 todo 2"]);
     let _ = std::fs::remove_dir_all(&home);
 }
 

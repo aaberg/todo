@@ -68,7 +68,7 @@ pub enum EventPayload {
         description: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         due_date: Option<NaiveDate>,
-        /// None = mark undone, Some(None) = no change, Some(Some(date)) = mark done
+        /// None = no change, Some(None) = mark undone, Some(Some(date)) = mark done
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
