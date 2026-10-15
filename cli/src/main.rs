@@ -96,6 +96,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 },
             )?;
             println!("Updated todo {id}.");
+            let todos = fold_events(&db.all_events()?);
+            let display = prepare_for_display(todos, today, false);
+            print_list(&display, today);
         }
         Commands::Done { id } => {
             let mut display = with_display_ids(todos);
@@ -112,6 +115,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 },
             )?;
             println!("Marked todo {id} as done.");
+            let todos = fold_events(&db.all_events()?);
+            let display = prepare_for_display(todos, today, false);
+            print_list(&display, today);
         }
         Commands::Undone { id } => {
             let mut display = with_display_ids(todos);
@@ -128,6 +134,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 },
             )?;
             println!("Marked todo {id} as not done.");
+            let todos = fold_events(&db.all_events()?);
+            let display = prepare_for_display(todos, today, false);
+            print_list(&display, today);
         }
         Commands::Remove { id } => {
             let mut display = with_display_ids(todos);
@@ -136,6 +145,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("todo {id} does not exist"))?;
             db.emit(todo_uuid, EventType::Delete, EventPayload::Delete)?;
             println!("Removed todo {id}.");
+            let todos = fold_events(&db.all_events()?);
+            let display = prepare_for_display(todos, today, false);
+            print_list(&display, today);
         }
         Commands::Log { id } => {
             let mut display = with_display_ids(todos);

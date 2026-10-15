@@ -36,15 +36,20 @@ pub fn to_wire(event: &Event) -> WireEvent {
             description,
             due_date,
             completed_on,
-        } => (
-            "update".to_string(),
-            serde_json::json!({
+        } => {
+            // Omit completed_on when the outer option is None so the wire
+            // payload preserves the None = no change / null = mark undone
+            // distinction (null here would deserialize as Some(None)).
+            let mut payload = serde_json::json!({
                 "type": "update",
                 "description": description,
                 "due_date": due_date,
-                "completed_on": completed_on,
-            }),
-        ),
+            });
+            if let Some(inner) = completed_on {
+                payload["completed_on"] = serde_json::json!(inner);
+            }
+            ("update".to_string(), payload)
+        }
         EventPayload::Delete => (
             "delete".to_string(),
             serde_json::json!({ "type": "delete" }),
@@ -444,6 +449,49 @@ mod tests {
         if let EventPayload::Update { description, completed_on, .. } = back.payload {
             assert_eq!(description, Some("Updated".to_string()));
             assert_eq!(completed_on, Some(Some(date("2026-10-07"))));
+        } else {
+            panic!("expected update payload");
+        }
+    }
+
+    #[test]
+    fn wire_roundtrip_update_no_completion_change() {
+        // Outer None = no change: must not become a mark-undone event after
+        // a wire roundtrip.
+        let event = Event {
+            event_type: EventType::Update,
+            payload: EventPayload::Update {
+                description: Some("Edited".to_string()),
+                due_date: None,
+                completed_on: None,
+            },
+            ..sample_event()
+        };
+        let wire = to_wire(&event);
+        let back = from_wire(&wire).unwrap();
+        if let EventPayload::Update { completed_on, .. } = back.payload {
+            assert_eq!(completed_on, None);
+        } else {
+            panic!("expected update payload");
+        }
+    }
+
+    #[test]
+    fn wire_roundtrip_update_mark_undone() {
+        // Some(None) = mark undone: must survive the wire roundtrip.
+        let event = Event {
+            event_type: EventType::Update,
+            payload: EventPayload::Update {
+                description: None,
+                due_date: None,
+                completed_on: Some(None),
+            },
+            ..sample_event()
+        };
+        let wire = to_wire(&event);
+        let back = from_wire(&wire).unwrap();
+        if let EventPayload::Update { completed_on, .. } = back.payload {
+            assert_eq!(completed_on, Some(None));
         } else {
             panic!("expected update payload");
         }
