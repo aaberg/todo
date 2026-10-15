@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     callback::CallbackServer,
     config::{Config, ensure_device_id},
-    db::{Database, SyncBindingError, SyncBindingState},
+    db::{Database, SyncBinding, SyncBindingError, SyncBindingState},
     event::{Event, EventPayload, EventType},
 };
 
@@ -156,14 +156,23 @@ fn verify_or_bind_on_login(
                 return Ok(());
             }
             // Legacy dataset: ownership must come from the previously
-            // configured session, not the new token.
+            // configured session, not the new token. The candidate must
+            // match that verified identity (and relay) before anything is
+            // adopted — a rejected login must not mutate the binding or
+            // cursor, so the comparison happens before the adoption.
             if let (Some(config_url), Some(token)) = (&config.sync_url, &config.session_token)
                 && let Ok(config_relay) = canonical_relay_url(config_url)
                 && let Ok(existing_me) = verify_identity(&config_relay, token)
             {
+                if config_relay != relay_url || existing_me.user_id != user_id {
+                    return Err(SyncError::Binding(SyncBindingError::Mismatch(
+                        SyncBinding {
+                            relay_url: config_relay,
+                            user_id: existing_me.user_id,
+                        },
+                    )));
+                }
                 db.adopt_legacy_sync_binding(&config_relay, existing_me.user_id)
-                    .map_err(SyncError::Binding)?;
-                db.bind_or_verify_sync(relay_url, user_id)
                     .map_err(SyncError::Binding)?;
                 return Ok(());
             }
@@ -277,7 +286,12 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
     // copied, or manually edited.
     let me = verify_identity(&relay_url, token)?;
     match db.sync_binding().map_err(SyncError::Db)? {
-        SyncBindingState::Bound(binding) if binding.user_id != me.user_id => {
+        // Recheck the full pair, not just the user: a concurrent invocation
+        // could have bound this previously absent dataset to the same user on
+        // a different relay while we were verifying against this one.
+        SyncBindingState::Bound(binding)
+            if binding.user_id != me.user_id || binding.relay_url != relay_url =>
+        {
             return Err(SyncError::Binding(SyncBindingError::Mismatch(binding)));
         }
         SyncBindingState::Bound(_) => {}

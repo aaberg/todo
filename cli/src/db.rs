@@ -418,6 +418,16 @@ impl Database {
                     params![SYNC_BINDING_USER_KEY, user_id.to_string()],
                 )
                 .map_err(SyncBindingError::Db)?;
+                // A genuinely new binding starts with a cursor of 0: a
+                // pre-existing cursor was never scoped to this account and
+                // must not skip its lower-sequence remote events. (Callers
+                // route datasets with prior sync evidence to the legacy
+                // adoption path; this is defense in depth for direct calls.)
+                tx.execute(
+                    "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_pulled_seq', '0')",
+                    [],
+                )
+                .map_err(SyncBindingError::Db)?;
                 tx.commit().map_err(SyncBindingError::Db)?;
                 Ok(SyncBinding {
                     relay_url: relay_url.to_string(),
@@ -814,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn first_binding_preserves_events_and_cursor() {
+    fn first_binding_preserves_events_and_initializes_cursor() {
         let mut db = test_database();
         db.emit(
             Uuid::new_v4(),
@@ -830,12 +840,14 @@ mod tests {
         db.bind_or_verify_sync("https://relay.example.com", Uuid::new_v4())
             .unwrap();
 
-        // Events retained; cursor untouched (not legacy: it was never used
-        // for a different account).
+        // Events retained; an unexplained pre-existing cursor is never
+        // carried into a fresh binding — it could skip the new account's
+        // lower-sequence remote events. Replay from 0 is safe: events
+        // deduplicate by event_id.
         assert_eq!(db.all_events().unwrap().len(), 1);
         assert_eq!(
             db.get_state("last_pulled_seq").unwrap().as_deref(),
-            Some("5")
+            Some("0")
         );
     }
 
