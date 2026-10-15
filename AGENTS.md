@@ -115,8 +115,9 @@ single source of truth. All three crates inherit it via `version.workspace = tru
 2. Run `cargo update --workspace` and commit `Cargo.toml` + `Cargo.lock` **together**.
    CI builds with `--locked`, so a stale lockfile fails the build with
    `cannot update the lock file ... because --locked was passed`.
-3. Tag `v<x.y.z>` matching the manifest version and push the tag.
-4. `gh release create v<x.y.z>` — this triggers `.github/workflows/release.yml`,
+3. Tag `<x.y.z>` matching the manifest version (no `v` prefix — releases in this
+   repo use bare version tags, e.g. `0.1.3`) and push the tag.
+4. Publish a GitHub release for that tag — this triggers `.github/workflows/release.yml`,
    which builds binaries for Linux/macOS/Windows, the Docker image, and fails if
    the tag does not match every workspace package's version.
 
