@@ -25,9 +25,10 @@ jobs:
       - name: Verify tag matches manifest version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          MANIFEST=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "todo") | .version')
-          if [ "$TAG" != "$MANIFEST" ]; then
-            echo "Release tag v$TAG does not match workspace version $MANIFEST" >&2
+          MISMATCHES=$(cargo metadata --format-version 1 --no-deps | jq -r --arg tag "$TAG" '.packages[] | select(.version != $tag) | "\(.name) \(.version)"')
+          if [ -n "$MISMATCHES" ]; then
+            echo "Release tag v$TAG does not match workspace package version(s):" >&2
+            echo "$MISMATCHES" >&2
             exit 1
           fi
 
