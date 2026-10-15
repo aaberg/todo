@@ -172,7 +172,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     prompt_relay_url(saved.as_deref())?
                 }
             };
-            sync::login(&relay_url)?;
+            sync::login(&mut db, &relay_url)?;
         }
         Commands::Sync => {
             let config = config::Config::load();

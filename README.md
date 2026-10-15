@@ -85,6 +85,34 @@ The session token is validated against the relay's `/me` before it is saved —
 a failed confirmation exits with an error and leaves your previous config
 untouched.
 
+**One database, one account.** The first successful login binds `~/.todo/todos.db`
+permanently to that relay and account (the relay URL plus the verified user
+UUID from `/me`, stored in the database itself). After that:
+
+- Logging in or syncing with a *different* account on the same relay — or with
+  a different relay — is rejected, including with a valid token. The binding is
+  checked again on every `todo sync`, so manually substituted credentials in
+  `config.toml` cannot bypass it.
+- `todo logout` removes only the session token. Your events, the account
+  binding, the device identity, and sync progress are all preserved, and every
+  local command (`add`, `list`, `edit`, `done`, `remove`, ...) keeps working
+  offline. Reauthenticating with the same account resumes sync where it left
+  off.
+- Todos created before the first login are kept and sync to the account you
+  choose at first login.
+- Databases from versions before the binding existed that already synced are
+  upgraded conservatively: the first `todo sync` or login under the new CLI
+  verifies your configured session via `/me` and records that identity as the
+  database's owner, resetting the sync cursor once (replay is safe — events
+  deduplicate by `event_id`). If the old credentials are gone and the original
+  account can no longer be verified, sync and login fail with a diagnostic
+  rather than silently binding to another account; local commands remain
+  usable.
+
+To use a different account or relay, use a fresh `HOME`/database (for example
+a separate machine or user). There is no supported way to rebind an existing
+database, by design: rebinding would upload its history to the wrong account.
+
 Pending logins on the relay are bounded: each login attempt is valid for at
 most five minutes, at most 1,024 attempts are retained at once, and each
 `cli_callback` URL is limited to 2,048 decoded bytes. Abandoned login

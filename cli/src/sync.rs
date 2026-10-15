@@ -13,18 +13,20 @@ use uuid::Uuid;
 
 use crate::{
     callback::CallbackServer,
-    config::{ensure_device_id, Config},
-    db::Database,
+    config::{Config, ensure_device_id},
+    db::{Database, SyncBinding, SyncBindingError, SyncBindingState},
     event::{Event, EventPayload, EventType},
 };
-
 
 // ─── Wire conversion ───
 
 /// Convert a local domain Event to a WireEvent for HTTP transport.
 pub fn to_wire(event: &Event) -> WireEvent {
     let (event_type, payload) = match &event.payload {
-        EventPayload::Create { description, due_date } => (
+        EventPayload::Create {
+            description,
+            due_date,
+        } => (
             "create".to_string(),
             serde_json::json!({
                 "type": "create",
@@ -69,8 +71,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
 pub fn from_wire(wire: &WireEvent) -> Result<Event, SyncError> {
     let event_type = EventType::from_str(&wire.event_type)
         .ok_or_else(|| SyncError::UnknownEventType(wire.event_type.clone()))?;
-    let payload = serde_json::from_value(wire.payload.clone())
-        .map_err(SyncError::PayloadParse)?;
+    let payload = serde_json::from_value(wire.payload.clone()).map_err(SyncError::PayloadParse)?;
     Ok(Event {
         event_id: wire.event_id,
         device_id: wire.device_id,
@@ -87,9 +88,23 @@ pub fn from_wire(wire: &WireEvent) -> Result<Event, SyncError> {
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Run the login flow: start a loopback server, open the browser, wait for
-/// the relay to redirect back with a session token.
-pub fn login(relay_url: &str) -> Result<(), SyncError> {
-    let relay_url = validate_relay_url(relay_url)?;
+/// the relay to redirect back with a session token, verify the session
+/// identity, and only then persist credentials — after checking the
+/// dataset's immutable sync binding.
+pub fn login(db: &mut Database, relay_url: &str) -> Result<(), SyncError> {
+    let relay_url = canonical_relay_url(relay_url)?;
+
+    // An obviously different relay can be rejected before opening the browser.
+    match db.sync_binding().map_err(SyncError::Db)? {
+        SyncBindingState::Bound(binding) if binding.relay_url != relay_url => {
+            return Err(SyncError::Binding(SyncBindingError::Mismatch(binding)));
+        }
+        SyncBindingState::Corrupt => {
+            return Err(SyncError::Binding(SyncBindingError::Corrupt));
+        }
+        _ => {}
+    }
+
     let server = CallbackServer::bind()?;
     let login_url = build_login_url(&relay_url, &server.callback_url())?;
 
@@ -106,7 +121,8 @@ pub fn login(relay_url: &str) -> Result<(), SyncError> {
     println!("Waiting for login to complete...");
     let token = server.wait_for_token(LOGIN_TIMEOUT)?;
 
-    let me = confirm_login(&relay_url, &token)?;
+    let me = verify_identity(&relay_url, &token)?;
+    verify_or_bind_on_login(db, &relay_url, me.user_id)?;
     save_session(&relay_url, &token)?;
     match me.email {
         Some(email) => println!("Logged in as {email}"),
@@ -115,11 +131,76 @@ pub fn login(relay_url: &str) -> Result<(), SyncError> {
     Ok(())
 }
 
+/// Check the candidate session identity against the dataset binding before
+/// credentials are persisted. For an already-bound dataset this is an exact
+/// match-or-fail. For an unbound dataset, any evidence of a prior configured
+/// sync relationship (cursor keys or stored credentials — an older CLI could
+/// log in without ever completing a sync) makes it a legacy upgrade: the
+/// previously configured session — if still verifiable — establishes the
+/// binding first, and the candidate must match it. Without evidence it is a
+/// genuinely unbound dataset and the candidate establishes the first binding.
+/// If legacy evidence exists but cannot be verified, fail closed.
+fn verify_or_bind_on_login(
+    db: &mut Database,
+    relay_url: &str,
+    user_id: Uuid,
+) -> Result<(), SyncError> {
+    match db.sync_binding().map_err(SyncError::Db)? {
+        SyncBindingState::Bound(_) | SyncBindingState::Corrupt => {
+            db.bind_or_verify_sync(relay_url, user_id)
+                .map_err(SyncError::Binding)?;
+            Ok(())
+        }
+        SyncBindingState::Absent => {
+            let config = Config::load();
+            if !has_prior_sync_relationship(db, &config)? {
+                // Genuinely unbound, never-configured dataset: first binding.
+                // Offline-created events are retained and will sync.
+                db.bind_or_verify_sync(relay_url, user_id)
+                    .map_err(SyncError::Binding)?;
+                return Ok(());
+            }
+            // Legacy dataset: ownership must come from the previously
+            // configured session, not the new token. The candidate must
+            // match that verified identity (and relay) before anything is
+            // adopted — a rejected login must not mutate the binding or
+            // cursor, so the comparison happens before the adoption.
+            if let (Some(config_url), Some(token)) = (&config.sync_url, &config.session_token)
+                && let Ok(config_relay) = canonical_relay_url(config_url)
+                && let Ok(existing_me) = verify_identity(&config_relay, token)
+            {
+                if config_relay != relay_url || existing_me.user_id != user_id {
+                    return Err(SyncError::Binding(SyncBindingError::Mismatch(
+                        SyncBinding {
+                            relay_url: config_relay,
+                            user_id: existing_me.user_id,
+                        },
+                    )));
+                }
+                db.adopt_legacy_sync_binding(&config_relay, existing_me.user_id)
+                    .map_err(SyncError::Binding)?;
+                return Ok(());
+            }
+            Err(SyncError::LegacyMigrationRequired)
+        }
+    }
+}
+
+/// Whether an unbound dataset shows evidence of a prior configured sync
+/// relationship. Cursor keys in the database are one form; stored relay
+/// credentials in the config file are another — an older CLI could complete a
+/// login without ever syncing, leaving credentials but no cursors. Either
+/// means ownership cannot be established from a new candidate token alone.
+fn has_prior_sync_relationship(db: &Database, config: &Config) -> Result<bool, SyncError> {
+    Ok(db.has_legacy_sync_evidence().map_err(SyncError::Db)?
+        || config.session_token.is_some())
+}
+
 /// Build the relay login URL with the CLI callback parameter.
 /// Rejects relay URLs that are not valid HTTP(S) URLs with a host so that
 /// bad `--relay` values or prompted input surface as an error, not a panic.
 fn build_login_url(relay_url: &str, cli_callback: &str) -> Result<String, SyncError> {
-    let base = validate_relay_url(relay_url)?;
+    let base = canonical_relay_url(relay_url)?;
     let mut url = reqwest::Url::parse(&format!("{base}/auth/login"))
         .map_err(|_| SyncError::InvalidRelayUrl)?;
     url.query_pairs_mut()
@@ -127,10 +208,15 @@ fn build_login_url(relay_url: &str, cli_callback: &str) -> Result<String, SyncEr
     Ok(url.into())
 }
 
-/// Check that a relay URL is an absolute HTTP(S) URL with a host, returning
-/// it without a trailing slash.
-fn validate_relay_url(relay_url: &str) -> Result<String, SyncError> {
-    let trimmed = relay_url.trim().trim_end_matches('/');
+/// Check that a relay URL is an absolute HTTP(S) URL with a host, and
+/// normalize it for binding identity comparison: scheme, host, effective
+/// port, and deployment base path, with trailing slashes treated
+/// consistently. A port equal to the scheme default is dropped, so
+/// `http://h:80` and `http://h` compare equal. Equivalent trailing slashes
+/// compare equal; everything else (different host, port, path, or an
+/// HTTP-to-HTTPS change) is a different relay.
+fn canonical_relay_url(relay_url: &str) -> Result<String, SyncError> {
+    let trimmed = relay_url.trim();
     if trimmed.is_empty() {
         return Err(SyncError::InvalidRelayUrl);
     }
@@ -139,16 +225,19 @@ fn validate_relay_url(relay_url: &str) -> Result<String, SyncError> {
         "http" | "https" => (),
         _ => return Err(SyncError::InvalidRelayUrl),
     }
-    if url.host_str().is_none() {
-        return Err(SyncError::InvalidRelayUrl);
-    }
+    let host = url.host_str().ok_or(SyncError::InvalidRelayUrl)?;
     if url.query().is_some() || url.fragment().is_some() {
         return Err(SyncError::InvalidRelayUrl);
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(SyncError::InvalidRelayUrl);
     }
-    Ok(trimmed.to_string())
+    let port = match url.port() {
+        Some(p) => format!(":{p}"),
+        None => String::new(),
+    };
+    let base_path = url.path().trim_end_matches('/');
+    Ok(format!("{}://{}{}{}", url.scheme(), host, port, base_path))
 }
 
 /// Persist the session token and relay URL to config.
@@ -160,8 +249,9 @@ fn save_session(relay_url: &str, token: &str) -> Result<(), SyncError> {
     config.save().map_err(SyncError::Config)
 }
 
-/// Query `/me` to confirm the login before persisting credentials.
-fn confirm_login(relay_url: &str, token: &str) -> Result<MeResponse, SyncError> {
+/// Query authenticated `/me` and require a successful, well-formed response.
+/// The returned `user_id` is the verified identity used for the sync binding.
+fn verify_identity(relay_url: &str, token: &str) -> Result<MeResponse, SyncError> {
     let client = reqwest::blocking::Client::new();
     let me_url = format!("{relay_url}/me");
 
@@ -176,12 +266,60 @@ fn confirm_login(relay_url: &str, token: &str) -> Result<MeResponse, SyncError> 
     resp.json::<MeResponse>().map_err(SyncError::Http)
 }
 
-
 // ─── Sync ───
 
 /// Run a full sync: pull remote events, apply locally, push local events.
 pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> {
     let (relay_url, token) = config.require_auth().map_err(SyncError::Config)?;
+    let relay_url = canonical_relay_url(relay_url)?;
+
+    // Enforce the dataset binding before any pull, push, cursor change, or
+    // network request. Checking the binding's relay URL locally first also
+    // means a substituted relay in config.toml is rejected before the active
+    // token is sent anywhere.
+    match db.sync_binding().map_err(SyncError::Db)? {
+        SyncBindingState::Corrupt => {
+            return Err(SyncError::Binding(SyncBindingError::Corrupt));
+        }
+        SyncBindingState::Bound(binding) if binding.relay_url != relay_url => {
+            return Err(SyncError::Binding(SyncBindingError::Mismatch(binding)));
+        }
+        _ => {}
+    }
+
+    // Re-verify the identity on every sync: stored credentials can be stale,
+    // copied, or manually edited.
+    let me = verify_identity(&relay_url, token)?;
+    match db.sync_binding().map_err(SyncError::Db)? {
+        // Recheck the full pair, not just the user: a concurrent invocation
+        // could have bound this previously absent dataset to the same user on
+        // a different relay while we were verifying against this one.
+        SyncBindingState::Bound(binding)
+            if binding.user_id != me.user_id || binding.relay_url != relay_url =>
+        {
+            return Err(SyncError::Binding(SyncBindingError::Mismatch(binding)));
+        }
+        SyncBindingState::Bound(_) => {}
+        SyncBindingState::Absent => {
+            // Unbound dataset. The /me identity verified above comes from the
+            // configured session itself (there is no separate candidate
+            // token on this path), so binding it is always adopting the
+            // verified configured identity — never a guess. With cursor
+            // evidence it is a legacy upgrade: adopt the identity and reset
+            // the previously unscoped cursor once.
+            if db.has_legacy_sync_evidence().map_err(SyncError::Db)? {
+                db.adopt_legacy_sync_binding(&relay_url, me.user_id)
+                    .map_err(SyncError::Binding)?;
+            } else {
+                db.bind_or_verify_sync(&relay_url, me.user_id)
+                    .map_err(SyncError::Binding)?;
+            }
+        }
+        SyncBindingState::Corrupt => {
+            return Err(SyncError::Binding(SyncBindingError::Corrupt));
+        }
+    }
+
     // Prefer the config's device_id (the single source of truth, adopted into
     // the DB at startup); fall back to the DB's identity if the config has no
     // valid UUID. Either way this matches the device_id stamped on locally
@@ -193,7 +331,6 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
         .unwrap_or(db.device_id().map_err(SyncError::Db)?);
 
     let client = reqwest::blocking::Client::new();
-    let relay_url = relay_url.trim_end_matches('/');
 
     // 1. PULL: get events from other devices
     let last_pulled: i64 = db
@@ -255,7 +392,9 @@ pub fn sync(db: &mut Database, config: &Config) -> Result<SyncStats, SyncError> 
         let push_resp = client
             .post(&push_url)
             .bearer_auth(token)
-            .json(&PushRequest { events: wire_events })
+            .json(&PushRequest {
+                events: wire_events,
+            })
             .send()
             .map_err(SyncError::Http)?;
 
@@ -329,10 +468,7 @@ pub fn logout(config: &mut Config) -> Result<(), SyncError> {
     if let (Some(relay_url), Some(token)) = (&config.sync_url, &config.session_token) {
         let client = reqwest::blocking::Client::new();
         let logout_url = format!("{}/auth/logout", relay_url.trim_end_matches('/'));
-        let _ = client
-            .post(&logout_url)
-            .bearer_auth(token)
-            .send();
+        let _ = client.post(&logout_url).bearer_auth(token).send();
     }
     config.session_token = None;
     config.save().map_err(SyncError::Config)?;
@@ -370,6 +506,8 @@ pub enum SyncError {
     UnknownEventType(String),
     PayloadParse(serde_json::Error),
     InvalidRelayUrl,
+    Binding(SyncBindingError),
+    LegacyMigrationRequired,
 }
 
 impl std::fmt::Display for SyncError {
@@ -386,6 +524,16 @@ impl std::fmt::Display for SyncError {
             SyncError::InvalidRelayUrl => write!(
                 f,
                 "invalid relay URL — expected an HTTP(S) URL with a host, no query, fragment, or embedded credentials, e.g. https://relay.example.com"
+            ),
+            SyncError::Binding(e) => write!(f, "{e}"),
+            SyncError::LegacyMigrationRequired => write!(
+                f,
+                "this todo database has synced before but does not record which \
+                 account owned its history, and the previous credentials cannot be \
+                 verified. All local data is kept and local commands remain usable, \
+                 but logging in or syncing with a new account would mix two \
+                 accounts' histories. Sync once with the original account's valid \
+                 session to record it as this database's owner"
             ),
         }
     }
@@ -446,7 +594,12 @@ mod tests {
         let wire = to_wire(&event);
         let back = from_wire(&wire).unwrap();
         assert_eq!(back.event_type, EventType::Update);
-        if let EventPayload::Update { description, completed_on, .. } = back.payload {
+        if let EventPayload::Update {
+            description,
+            completed_on,
+            ..
+        } = back.payload
+        {
             assert_eq!(description, Some("Updated".to_string()));
             assert_eq!(completed_on, Some(Some(date("2026-10-07"))));
         } else {
@@ -539,16 +692,58 @@ mod tests {
     #[test]
     fn validate_relay_url_accepts_http_and_https_with_host() {
         assert_eq!(
-            validate_relay_url("https://relay.example.com").unwrap(),
+            canonical_relay_url("https://relay.example.com").unwrap(),
             "https://relay.example.com"
         );
         assert_eq!(
-            validate_relay_url("http://127.0.0.1:8080/").unwrap(),
+            canonical_relay_url("http://127.0.0.1:8080/").unwrap(),
             "http://127.0.0.1:8080"
         );
         assert_eq!(
-            validate_relay_url("  https://relay.example.com/  ").unwrap(),
+            canonical_relay_url("  https://relay.example.com/  ").unwrap(),
             "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn canonical_relay_url_preserves_ipv6_brackets() {
+        assert_eq!(
+            canonical_relay_url("http://[::1]:8080").unwrap(),
+            "http://[::1]:8080"
+        );
+        assert_eq!(canonical_relay_url("http://[::1]/").unwrap(), "http://[::1]");
+        assert_eq!(
+            canonical_relay_url("http://[2001:db8::1]:3000/relay/").unwrap(),
+            "http://[2001:db8::1]:3000/relay"
+        );
+        // The canonical form must be a usable request base for loopback relays.
+        let canonical = canonical_relay_url("http://[::1]:8080/").unwrap();
+        let parsed = reqwest::Url::parse(&format!("{canonical}/me")).unwrap();
+        assert_eq!(parsed.host_str(), Some("[::1]"));
+        assert_eq!(parsed.port(), Some(8080));
+    }
+
+    #[test]
+    fn canonical_relay_url_normalizes_default_ports() {
+        // An explicitly supplied scheme-default port must not make the same
+        // relay look different from the spelling without the port.
+        assert_eq!(
+            canonical_relay_url("http://relay.example.com:80").unwrap(),
+            canonical_relay_url("http://relay.example.com").unwrap()
+        );
+        assert_eq!(
+            canonical_relay_url("https://relay.example.com:443/").unwrap(),
+            canonical_relay_url("https://relay.example.com").unwrap()
+        );
+        // Non-default ports are significant and preserved.
+        assert_eq!(
+            canonical_relay_url("http://relay.example.com:8080").unwrap(),
+            "http://relay.example.com:8080"
+        );
+        // A non-default port for the scheme stays distinct.
+        assert_ne!(
+            canonical_relay_url("https://relay.example.com:80").unwrap(),
+            canonical_relay_url("https://relay.example.com").unwrap()
         );
     }
 
@@ -566,7 +761,10 @@ mod tests {
             "https://user@relay.example.com",
             "https://user:secret@relay.example.com",
         ] {
-            assert!(validate_relay_url(bad).is_err(), "expected {bad:?} to be rejected");
+            assert!(
+                canonical_relay_url(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
         }
     }
 
@@ -581,6 +779,40 @@ mod tests {
     }
 
     #[test]
+    fn stored_credentials_alone_are_prior_sync_evidence() {
+        let db = test_database();
+
+        // No cursors, no stored credentials: eligible for first binding.
+        let config = Config::default();
+        assert!(!has_prior_sync_relationship(&db, &config).unwrap());
+
+        // Cursor keys alone are evidence.
+        let mut db = test_database();
+        db.set_state("last_pulled_seq", "3").unwrap();
+        assert!(has_prior_sync_relationship(&db, &config).unwrap());
+
+        // Stored credentials alone are evidence too: an older CLI could log
+        // in without ever completing a sync, leaving no cursors behind.
+        let db = test_database();
+        let config = Config {
+            sync_url: Some("https://relay.example.com".to_string()),
+            session_token: Some("token".to_string()),
+            device_id: None,
+        };
+        assert!(has_prior_sync_relationship(&db, &config).unwrap());
+
+        // A sync_url without a token (e.g. after logout) is not, on its own,
+        // credentials — but logout preserves cursors, so the cursor check
+        // still covers that case for datasets that actually synced.
+        let config = Config {
+            sync_url: Some("https://relay.example.com".to_string()),
+            session_token: None,
+            device_id: None,
+        };
+        assert!(!has_prior_sync_relationship(&db, &config).unwrap());
+    }
+
+    #[test]
     fn pull_cursor_stops_at_incompatible_event() {
         let mut db = test_database();
         let good = to_wire(&sample_event());
@@ -588,9 +820,15 @@ mod tests {
         bad.event_type = "future_type".to_string();
 
         let pulled = vec![
-            todo_common::wire::PulledEvent { seq: 1, event: good },
+            todo_common::wire::PulledEvent {
+                seq: 1,
+                event: good,
+            },
             todo_common::wire::PulledEvent { seq: 2, event: bad },
-            todo_common::wire::PulledEvent { seq: 3, event: to_wire(&sample_event()) },
+            todo_common::wire::PulledEvent {
+                seq: 3,
+                event: to_wire(&sample_event()),
+            },
         ];
 
         let result = apply_pulled_events(&mut db, 0, &pulled);
@@ -598,25 +836,40 @@ mod tests {
 
         // Only the first event was applied; the cursor stays before the bad one.
         assert_eq!(db.all_events().unwrap().len(), 1);
-        assert_eq!(db.get_state("last_pulled_seq").unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            db.get_state("last_pulled_seq").unwrap().as_deref(),
+            Some("1")
+        );
 
         // Retrying from the saved cursor re-fetches the bad event first.
         let next = apply_pulled_events(&mut db, 1, &pulled[1..]);
         assert!(next.is_err());
-        assert_eq!(db.get_state("last_pulled_seq").unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            db.get_state("last_pulled_seq").unwrap().as_deref(),
+            Some("1")
+        );
     }
 
     #[test]
     fn pull_cursor_advances_on_clean_pass() {
         let mut db = test_database();
         let events = vec![
-            todo_common::wire::PulledEvent { seq: 1, event: to_wire(&sample_event()) },
-            todo_common::wire::PulledEvent { seq: 2, event: to_wire(&sample_event()) },
+            todo_common::wire::PulledEvent {
+                seq: 1,
+                event: to_wire(&sample_event()),
+            },
+            todo_common::wire::PulledEvent {
+                seq: 2,
+                event: to_wire(&sample_event()),
+            },
         ];
 
         let count = apply_pulled_events(&mut db, 0, &events).unwrap();
         assert_eq!(count, 2);
         assert_eq!(db.all_events().unwrap().len(), 2);
-        assert_eq!(db.get_state("last_pulled_seq").unwrap().as_deref(), Some("2"));
+        assert_eq!(
+            db.get_state("last_pulled_seq").unwrap().as_deref(),
+            Some("2")
+        );
     }
 }
