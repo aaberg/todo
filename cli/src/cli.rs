@@ -4,12 +4,11 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "todo",
     about = "A small, local todo list",
-    version,
-    arg_required_else_help = true
+    version
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]

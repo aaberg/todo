@@ -7,6 +7,7 @@ mod display;
 mod event;
 mod model;
 mod sync;
+mod tui;
 
 use std::{
     env,
@@ -58,6 +59,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     let todos = fold_events(&events);
 
     match cli.command {
+        None => tui::run(&mut db, today)?,
+        Some(command) => run_command(command, &mut db, todos, today)?,
+    }
+
+    Ok(())
+}
+
+fn run_command(
+    command: Commands,
+    mut db: &mut Database,
+    todos: Vec<Todo>,
+    today: chrono::NaiveDate,
+) -> Result<(), Box<dyn Error>> {
+    match command {
         Commands::List { all } => {
             let display = prepare_for_display(todos, today, all);
             print_list(&display, today);

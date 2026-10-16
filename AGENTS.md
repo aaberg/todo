@@ -17,7 +17,8 @@ todo/
 │       ├── display.rs  # terminal output, colors, print_log
 │       ├── date.rs     # relative date parsing (Nd syntax)
 │       ├── config.rs   # ~/.todo/config.toml (sync_url, session_token, device_id)
-│       └── sync.rs     # HTTP client: login, sync (push/pull), logout, whoami
+│       ├── sync.rs     # HTTP client: login, sync (push/pull), logout, whoami
+│       └── tui.rs      # interactive mode (ratatui + crossterm), bare `todo`
 ├── common/             # library: todo-common
 │   └── src/wire.rs     # WireEvent, Push/Pull/Me request+response types (HTTP contract)
 └── relay/              # binary: todo-relay (the sync server)

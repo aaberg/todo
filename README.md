@@ -53,7 +53,13 @@ todo edit 1 "Buy oat milk"  # change description
 todo remove 1               # permanently delete
 todo log 1                  # show event history for todo 1
 todo prune                  # delete all completed todos
-```
+```### Interactive mode (TUI)Running `todo` with no subcommand opens an interactive terminal UI:```todo                         # open the interactive TUI
+```Key bindings:- `↑`/`↓` — move selection
+- `space` — mark the selected todo as done (or undone)
+- `a` — add a new todo (due today; type the description, press `Enter`)
+- `e` — edit the selected todo's description
+- `x` — delete the selected todo (asks for confirmation, `y`/`n`)
+- `q` or `Esc` — quit and print the final list
 
 ### About the numbered IDs
 
