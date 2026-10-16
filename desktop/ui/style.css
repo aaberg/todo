@@ -1,0 +1,81 @@
+* { box-sizing: border-box; }
+
+:root {
+  --bg: #16181d;
+  --panel: #1e2128;
+  --border: #2a2e37;
+  --fg: #e6e6e6;
+  --muted: #8a8f9a;
+  --accent: #7aa2f7;
+  --done: #565f70;
+  --danger: #f7768e;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.4 system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
+.auth { display: flex; align-items: center; gap: 6px; }
+
+button {
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover { border-color: var(--accent); }
+
+.add-form {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.add-form input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 6px 10px;
+  font: inherit;
+}
+.add-form input:focus { outline: none; border-color: var(--accent); }
+
+.todo-list { list-style: none; margin: 0; padding: 6px 14px; overflow-y: auto; flex: 1; }
+.todo-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.todo-list li.done .description { color: var(--done); text-decoration: line-through; }
+.description { flex: 1; overflow-wrap: anywhere; }
+.due { color: var(--muted); font-size: 12px; }
+.due.overdue { color: var(--danger); }
+li .delete { border: none; color: var(--muted); background: none; padding: 2px; }
+li .delete:hover { color: var(--danger); }
+
+.empty { text-align: center; padding: 30px 0; }
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.footer label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.muted { color: var(--muted); }

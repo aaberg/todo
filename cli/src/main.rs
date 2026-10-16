@@ -1,12 +1,5 @@
-mod callback;
 mod cli;
-mod config;
-mod date;
-mod db;
 mod display;
-mod event;
-mod model;
-mod sync;
 mod tui;
 
 use std::{
@@ -22,11 +15,18 @@ use clap::Parser;
 use uuid::Uuid;
 
 use cli::{Cli, Commands};
-use date::parse_relative_due_date;
-use db::Database;
 use display::{print_list, print_log};
-use event::{EventPayload, EventType};
-use model::{fold_events, prepare_for_display, resolve_display_id, sort_for_display, with_display_ids, Todo};
+use todo_core::{
+    config,
+    date::parse_relative_due_date,
+    db::Database,
+    event::{EventPayload, EventType},
+    model::{
+        Todo, fold_events, prepare_for_display, resolve_display_id, sort_for_display,
+        with_display_ids,
+    },
+    sync,
+};
 
 fn main() {
     if let Err(error) = run() {

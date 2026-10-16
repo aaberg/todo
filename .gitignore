@@ -11,3 +11,5 @@ relay/.env
 .DS_Store
 
 .cargo/
+# Tauri generated files
+desktop/src-tauri/gen/schemas/

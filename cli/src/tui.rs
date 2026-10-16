@@ -13,10 +13,10 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use uuid::Uuid;
 
-use crate::db::Database;
+use todo_core::db::Database;
 use crate::display::print_list;
-use crate::event::{EventPayload, EventType};
-use crate::model::{fold_events, group_name, prepare_for_display, Todo};
+use todo_core::event::{EventPayload, EventType};
+use todo_core::model::{fold_events, group_name, prepare_for_display, Todo};
 
 const ORANGE: Color = Color::Rgb(255, 165, 0);
 const RED: Color = Color::Red;

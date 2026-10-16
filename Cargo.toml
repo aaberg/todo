@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "common", "relay"]
+members = ["cli", "common", "core", "desktop/src-tauri", "relay"]
 resolver = "2"
 
 [workspace.package]

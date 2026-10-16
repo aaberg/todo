@@ -5,15 +5,11 @@ edition = "2024"
 
 [dependencies]
 todo-common = { path = "../common" }
+todo-core = { path = "../core" }
 chrono = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
-rusqlite = { workspace = true }
 uuid = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
-open = "5"
-toml = "0.8"
 url = { workspace = true }
 ratatui = "0.30"
 crossterm = "0.28"
+

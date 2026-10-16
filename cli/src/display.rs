@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 
-use crate::event::Event;
-use crate::model::{Todo, group_name};
+use todo_core::event::Event;
+use todo_core::model::{Todo, group_name};
 
 
 const ORANGE: &str = "\x1b[38;2;255;165;0m";
@@ -73,10 +73,10 @@ pub fn print_log(id: i64, todo: &Todo, events: &[Event]) {
         let ts = event.timestamp.format("%Y-%m-%d %H:%M:%S UTC");
         let device = &event.device_id.to_string()[..8];
         let description = match &event.payload {
-            crate::event::EventPayload::Create { description, due_date } => {
+            todo_core::event::EventPayload::Create { description, due_date } => {
                 format!("created: \"{description}\" due {}", due_date.format("%Y-%m-%d"))
             }
-            crate::event::EventPayload::Update {
+            todo_core::event::EventPayload::Update {
                 description,
                 due_date,
                 completed_on,
@@ -96,7 +96,7 @@ pub fn print_log(id: i64, todo: &Todo, events: &[Event]) {
                 }
                 format!("updated: {}", parts.join(", "))
             }
-            crate::event::EventPayload::Delete => "deleted".to_owned(),
+            todo_core::event::EventPayload::Delete => "deleted".to_owned(),
         };
         println!("  {DIM}{ts}{RESET} [{device}] {description}");
     }

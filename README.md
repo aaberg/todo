@@ -72,6 +72,17 @@ Key bindings:
 - `x` — delete the selected todo (asks for confirmation, `y`/`n`)
 - `q` or `Esc` — quit and print the final list
 
+### Desktop app
+
+A Tauri 2 desktop app lives in `desktop/` and shares the exact same local data
+as the CLI (`~/.todo/todos.db` and `~/.todo/config.toml`) — run both against
+the same todos on the same machine. See [desktop/README.md](desktop/README.md)
+for build instructions and Linux system dependencies.
+
+```bash
+cargo build -p todo-desktop
+```
+
 ### About the numbered IDs
 
 The numbers shown by `todo list` are ephemeral display IDs, reassigned on every

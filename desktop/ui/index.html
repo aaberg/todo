@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>todo</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <h1>todo</h1>
+        <div class="auth">
+          <span id="auth-status" class="muted"></span>
+          <button id="sync-btn" title="Sync now">&#x21bb;</button>
+          <button id="auth-btn" title="Login / logout">&#x2699;</button>
+        </div>
+      </header>
+
+      <form id="add-form" class="add-form">
+        <input
+          id="add-description"
+          type="text"
+          placeholder="Add a todo… (optional: 1d, 2w, 2026-12-01)"
+          autocomplete="off"
+          autofocus
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      <ul id="todo-list" class="todo-list"></ul>
+      <p id="empty" class="empty muted">Nothing due. Enjoy your day.</p>
+
+      <footer class="footer muted">
+        <label><input type="checkbox" id="show-all" /> Show completed</label>
+        <span id="flash"></span>
+      </footer>
+    </main>
+    <script src="main.js"></script>
+  </body>
+</html>

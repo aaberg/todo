@@ -6,21 +6,27 @@ A local-first todo CLI with multi-device sync via an event-sourced relay.
 
 ```
 todo/
-├── Cargo.toml          # workspace root: members = [cli, common, relay]
+├── Cargo.toml          # workspace root: members = [cli, common, core, desktop/src-tauri, relay]
 ├── cli/                # binary: todo (the CLI)
 │   └── src/
 │       ├── main.rs     # entry, command dispatch
 │       ├── cli.rs      # clap: Cli, Commands
+│       ├── display.rs  # terminal output, colors, print_log
+│       └── tui.rs      # interactive mode (ratatui + crossterm), bare `todo`
+├── core/               # library: todo-core (shared by CLI and desktop)
+│   └── src/
 │       ├── db.rs       # local SQLite event store
 │       ├── model.rs    # fold_events, display IDs, grouping/sorting
 │       ├── event.rs    # domain: Event, EventType, EventPayload
-│       ├── display.rs  # terminal output, colors, print_log
 │       ├── date.rs     # relative date parsing (Nd syntax)
 │       ├── config.rs   # ~/.todo/config.toml (sync_url, session_token, device_id)
 │       ├── sync.rs     # HTTP client: login, sync (push/pull), logout, whoami
-│       └── tui.rs      # interactive mode (ratatui + crossterm), bare `todo`
+│       └── callback.rs # loopback OAuth callback server
 ├── common/             # library: todo-common
 │   └── src/wire.rs     # WireEvent, Push/Pull/Me request+response types (HTTP contract)
+├── desktop/            # binary: todo-desktop (Tauri 2 GUI)
+│   ├── ui/             # static frontend (no Node build step): index.html, main.js, style.css
+│   └── src-tauri/      # Rust shell: commands wrapping todo-core, tauri.conf.json
 └── relay/              # binary: todo-relay (the sync server)
     ├── .env.example    # required env vars template
     ├── Caddyfile       # TLS reverse proxy config
@@ -38,7 +44,7 @@ todo/
 
 **Event sourcing.** The CLI stores an append-only `events` table in local SQLite
 (`~/.todo/todos.db`). There is no `todos` table. Current state is derived by folding
-events: `fold_events()` in `cli/src/model.rs`. Events are sorted by `(timestamp, event_id)`
+events: `fold_events()` in `core/src/model.rs`. Events are sorted by `(timestamp, event_id)` Events are sorted by `(timestamp, event_id)`
 for deterministic order.
 
 **Sync model.** The relay is a dumb event pipe. It stores events per user, dedupes by
@@ -48,7 +54,7 @@ fold the same event set in the same order.
 
 **Wire format.** `common/src/wire.rs` defines the HTTP/JSON contract. The relay treats
 `event_type` and `payload` as opaque strings/JSON — it never deserializes domain types.
-The CLI converts between `Event` (typed) and `WireEvent` (opaque) in `cli/src/sync.rs`.
+The CLI converts between `Event` (typed) and `WireEvent` (opaque) in `core/src/sync.rs`.
 
 **Auth.** OIDC via Authelia. Flow: `todo login` → CLI starts loopback server → opens
 browser to relay `/auth/login` → relay redirects to Authelia → user authenticates →
@@ -64,10 +70,10 @@ to a todo UUID internally. UUIDs are the only stable identity.
 ## Build & Test
 
 ```bash
-cargo build --workspace        # build all 3 crates
+cargo build --workspace        # build all 5 crates (CLI needs only cargo; desktop needs Tauri system deps)
 cargo build -p todo            # build CLI only
 cargo build -p todo-relay      # build relay only
-cargo test --workspace         # 36 tests
+cargo test --workspace         # 66 tests
 cargo build --release -p todo  # release CLI binary
 ```
 
@@ -76,6 +82,23 @@ cargo build --release -p todo  # release CLI binary
 ```bash
 cargo run -p todo -- <args>    # or use target/debug/todo
 ```
+
+## Build & Run the Desktop App (Tauri)
+
+The desktop app shares the exact same local store as the CLI: `~/.todo/todos.db`
+and `~/.todo/config.toml`. Run both against the same data on one machine.
+
+Linux build deps (Ubuntu/Debian): `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf`.
+
+```bash
+cargo build -p todo-desktop   # debug build
+# or install the tauri CLI for dev/bundling:
+# cargo install tauri-cli --version ^2 && cargo tauri dev / cargo tauri build
+```
+
+Frontend is plain HTML/JS/CSS in `desktop/ui/` — no Node toolchain. Tauri commands
+live in `desktop/src-tauri/src/commands.rs` and wrap `todo-core` functions. Blocking
+core calls (sync, login) run via `tauri::async_runtime::spawn_blocking`.
 
 ## Run the Relay (local)
 
@@ -154,9 +177,9 @@ cargo test --workspace
 ```
 
 Test coverage includes:
-- `cli/src/db.rs` — 6 convergence tests (two-machine sync simulation, LWW conflicts,
+- `core/src/db.rs` — 6 convergence tests (two-machine sync simulation, LWW conflicts,
   delete-vs-update, dedup, complex interleaved scenario)
-- `cli/src/model.rs` — fold_events unit tests (create, update, delete, resurrection,
+- `core/src/model.rs` — fold_events unit tests (create, update, delete, resurrection,
   ordering, display IDs)
-- `cli/src/sync.rs` — wire roundtrip tests, token extraction, URL encoding
-- `cli/src/config.rs` — config serialization, auth state
+- `core/src/sync.rs` — wire roundtrip tests, token extraction, URL encoding
+- `core/src/config.rs` — config serialization, auth state
