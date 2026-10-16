@@ -276,10 +276,19 @@ impl TerminalGuard {
     fn new() -> Result<Self, Box<dyn Error>> {
         let mut stdout = io::stdout();
         enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen)?;
+        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(error.into());
+        }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        match Terminal::new(backend) {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(error) => {
+                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                let _ = disable_raw_mode();
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -292,7 +301,7 @@ impl Drop for TerminalGuard {
 }
 
 pub fn run(db: &mut Database, today: NaiveDate) -> Result<(), Box<dyn Error>> {
-    if !io::stdout().is_terminal() {
+    if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
         return Err("interactive mode requires a terminal".into());
     }
     let todos = fold_events(&db.all_events()?);
@@ -326,7 +335,7 @@ fn event_loop(
 
     loop {
         let selected_uuid = app.selected_uuid();
-        list_state.select(if app.todos.is_empty() { None } else { Some(app.selected_index) });
+        list_state.select(selected_item_index(app));
 
         let terminal = &mut guard.terminal;
         terminal.draw(|frame| {
@@ -375,6 +384,26 @@ fn event_loop(
             }
         }
     }
+}
+
+fn selected_item_index(app: &App) -> Option<usize> {
+    if app.todos.is_empty() {
+        return None;
+    }
+    let mut item_index = 0;
+    let mut current_group: Option<String> = None;
+    for (index, (_, todo)) in app.todos.iter().enumerate() {
+        let group = group_name(todo, app.today);
+        if current_group.as_deref() != Some(group.as_str()) {
+            item_index += 1;
+            current_group = Some(group);
+        }
+        if index == app.selected_index {
+            return Some(item_index);
+        }
+        item_index += 1;
+    }
+    None
 }
 
 fn render_list(
@@ -473,7 +502,18 @@ fn render_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: 
         .unwrap_or("");
     let text = format!("Delete \"{description}\" permanently? (y/n)");
 
-    let box_width = text.chars().count().max(20) as u16 + 4;
+    let max_width = area.width.saturating_sub(4) as usize;
+    let shown = if text.chars().count() > max_width && max_width > 0 {
+        let prefix = "Delete \"";
+        let keep = max_width.saturating_sub(prefix.chars().count() + "… \" perm.".chars().count());
+        let trimmed: String = description.chars().take(keep).collect();
+        format!("{prefix}{trimmed}… \" permanently? (y/n)")
+    } else {
+        text
+    };
+    let text = shown;
+
+    let box_width = (text.chars().count().max(20) as u16 + 4).min(area.width);
     let box_height = 3u16;
     let x = area.x + (area.width.saturating_sub(box_width)) / 2;
     let y = area.y + (area.height.saturating_sub(box_height)) / 2;
@@ -629,6 +669,26 @@ mod tests {
         let mut app = sample_app();
         assert_eq!(app.handle_key(Key::Char('q')), Action::Quit);
         assert!(app.quit);
+    }
+
+    #[test]
+    fn selected_item_index_counts_group_headings() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let overdue = todo(Uuid::new_v4(), "overdue", yesterday, false);
+        let current = todo(Uuid::new_v4(), "current", today, false);
+        let todos = vec![(1, overdue), (2, current)];
+        let mut app = App::new(todos, today);
+        assert_eq!(selected_item_index(&app), Some(1));
+        app.selected_index = 1;
+        assert_eq!(selected_item_index(&app), Some(2));
+    }
+
+    #[test]
+    fn selected_item_index_empty_returns_none() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        let app = App::new(Vec::new(), today);
+        assert_eq!(selected_item_index(&app), None);
     }
 
     #[test]
