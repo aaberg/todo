@@ -108,9 +108,11 @@ pub fn resolve_display_id(display_id: i64, todos: &[(i64, Todo)]) -> Option<Uuid
         .map(|(_, todo)| todo.uuid)
 }
 
+/// Group todos by due date only, so completing a todo never moves it between
+/// groups. Open and completed overdue todos both stay in the Overdue group.
 pub fn group_name(todo: &Todo, today: NaiveDate) -> String {
-    if todo.completed_on.is_none() && todo.due_date <= today {
-        "Today".to_owned()
+    if todo.due_date < today {
+        "Overdue".to_owned()
     } else if todo.due_date == today {
         "Today".to_owned()
     } else if todo.due_date == today.succ_opt().expect("valid tomorrow") {
@@ -121,24 +123,14 @@ pub fn group_name(todo: &Todo, today: NaiveDate) -> String {
 }
 
 pub fn group_order(todo: &Todo, today: NaiveDate) -> u8 {
-    if group_name(todo, today) == "Today" {
+    if todo.due_date < today {
         0
-    } else if group_name(todo, today) == "Tomorrow" {
+    } else if todo.due_date == today {
         1
-    } else if todo.due_date > today {
+    } else if todo.due_date == today.succ_opt().expect("valid tomorrow") {
         2
     } else {
         3
-    }
-}
-
-pub fn todo_order_within_group(todo: &Todo, today: NaiveDate) -> u8 {
-    if todo.completed_on.is_some() {
-        2
-    } else if todo.due_date < today {
-        0
-    } else {
-        1
     }
 }
 
@@ -154,12 +146,12 @@ pub fn prepare_for_display(todos: Vec<Todo>, today: NaiveDate, all: bool) -> Vec
     display
 }
 
-/// Sort todos for display: by group, then within-group order, then due date, then creation.
+/// Sort todos for display: by group, then due date, then creation. Completion
+/// state is not part of the key, so completing a todo never reorders the list.
 pub fn sort_for_display(todos: &mut [(i64, Todo)], today: NaiveDate) {
     todos.sort_by_key(|(_, todo)| {
         (
             group_order(todo, today),
-            todo_order_within_group(todo, today),
             todo.due_date,
             todo.created_at,
         )
@@ -484,14 +476,14 @@ mod tests {
         let default_list = prepare_for_display(todos, today, false);
 
         assert_eq!(default_list.len(), 2);
-        assert_eq!(resolve_display_id(1, &default_list), Some(open_uuid));
-        assert_eq!(resolve_display_id(2, &default_list), Some(done_uuid));
-        assert_eq!(resolve_display_id(1, &all_list), Some(open_uuid));
-        assert_eq!(resolve_display_id(2, &all_list), Some(done_uuid));
+        assert_eq!(resolve_display_id(1, &default_list), Some(done_uuid));
+        assert_eq!(resolve_display_id(2, &default_list), Some(open_uuid));
+        assert_eq!(resolve_display_id(1, &all_list), Some(done_uuid));
+        assert_eq!(resolve_display_id(2, &all_list), Some(open_uuid));
     }
 
     #[test]
-    fn overdue_open_todos_are_grouped_with_today() {
+    fn overdue_open_todos_are_grouped_under_overdue() {
         let today = date("2026-08-11");
         let todo = Todo {
             uuid: Uuid::new_v4(),
@@ -500,6 +492,40 @@ mod tests {
             completed_on: None,
             created_at: Utc::now(),
         };
-        assert_eq!(group_name(&todo, today), "Today");
+        assert_eq!(group_name(&todo, today), "Overdue");
+        assert_eq!(group_order(&todo, today), 0);
+    }
+
+    #[test]
+    fn completing_a_todo_does_not_reorder_the_list() {
+        let today = date("2026-08-11");
+        let open = Todo {
+            uuid: Uuid::new_v4(),
+            description: "open".to_owned(),
+            due_date: date("2026-08-10"),
+            completed_on: None,
+            created_at: DateTime::parse_from_rfc3339("2026-08-10T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let completed = Todo {
+            uuid: Uuid::new_v4(),
+            description: "completed".to_owned(),
+            due_date: date("2026-08-10"),
+            completed_on: Some(today),
+            created_at: DateTime::parse_from_rfc3339("2026-08-10T11:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        assert_eq!(group_name(&completed, today), "Overdue");
+        let mut before = vec![(1, open.clone()), (2, completed.clone())];
+        sort_for_display(&mut before, today);
+        assert_eq!(before[0].1.uuid, open.uuid);
+        assert_eq!(before[1].1.uuid, completed.uuid);
+        let mut after = vec![(1, open.clone()), (2, completed.clone())];
+        after[1].1.completed_on = None;
+        sort_for_display(&mut after, today);
+        assert_eq!(after[0].1.uuid, open.uuid);
+        assert_eq!(after[1].1.uuid, completed.uuid);
     }
 }

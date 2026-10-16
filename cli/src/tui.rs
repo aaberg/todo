@@ -20,7 +20,7 @@ use crate::model::{fold_events, group_name, prepare_for_display, Todo};
 
 const ORANGE: Color = Color::Rgb(255, 165, 0);
 const RED: Color = Color::Red;
-const GREEN: Color = Color::Green;
+const GRAY: Color = Color::DarkGray;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -428,9 +428,14 @@ fn render_list(
         for (index, (id, todo)) in app.todos.iter().enumerate() {
             let group = group_name(todo, app.today);
             if current_group.as_deref() != Some(group.as_str()) {
+                let heading_style = if group == "Overdue" {
+                    Style::default().fg(RED).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(ORANGE)
+                };
                 items.push(ratatui::widgets::ListItem::new(Line::styled(
                     group.clone(),
-                    Style::default().fg(ORANGE),
+                    heading_style,
                 )));
                 current_group = Some(group);
             }
@@ -543,7 +548,7 @@ fn render_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: 
 
 fn todo_style(todo: &Todo, today: NaiveDate) -> Style {
     if todo.completed_on.is_some() {
-        Style::default().fg(GREEN).add_modifier(Modifier::CROSSED_OUT)
+        Style::default().fg(GRAY).add_modifier(Modifier::CROSSED_OUT)
     } else if todo.due_date < today {
         Style::default().fg(RED)
     } else {
@@ -684,12 +689,15 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
         let yesterday = today.pred_opt().unwrap();
         let overdue = todo(Uuid::new_v4(), "overdue", yesterday, false);
+        let completed_overdue = todo(Uuid::new_v4(), "done overdue", yesterday, true);
         let current = todo(Uuid::new_v4(), "current", today, false);
-        let todos = vec![(1, overdue), (2, current)];
+        let todos = vec![(1, overdue), (2, completed_overdue), (3, current)];
         let mut app = App::new(todos, today);
         assert_eq!(selected_item_index(&app), Some(1));
         app.selected_index = 1;
         assert_eq!(selected_item_index(&app), Some(2));
+        app.selected_index = 2;
+        assert_eq!(selected_item_index(&app), Some(4));
     }
 
     #[test]

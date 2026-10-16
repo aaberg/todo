@@ -88,14 +88,14 @@ fn done_prints_confirmation_and_updated_list() {
 fn undone_prints_confirmation_and_updated_list() {
     let home = setup_with_todos("undone", 2);
     run(&home, &["done", "1"]);
-    // Completed todos sort to the end, so the completed todo is now ID 2.
-    let (stdout, stderr) = run(&home, &["undone", "2"]);
+    // Completion no longer reorders todos, so the completed todo keeps ID 1.
+    let (stdout, stderr) = run(&home, &["undone", "1"]);
     assert!(
         stderr.is_empty(),
         "undone failed unexpectedly: {stderr} (stdout: {stdout})"
     );
     assert!(
-        stdout.contains("Marked todo 2 as not done."),
+        stdout.contains("Marked todo 1 as not done."),
         "got:\n{stdout}"
     );
     // The refreshed list must show both todos back to pending.
