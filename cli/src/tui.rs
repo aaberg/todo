@@ -137,7 +137,7 @@ impl App {
                 }
                 Action::None
             }
-            Key::Char(' ') => match self.selected_uuid() {
+            Key::Char(' ') | Key::Enter => match self.selected_uuid() {
                 Some(uuid) => Action::Toggle(uuid),
                 None => Action::None,
             },
@@ -444,7 +444,7 @@ fn render_list(
             Span::raw("_"),
         ]),
         _ => Line::from(Span::styled(
-            "↑/↓ select · space toggle · a add · e edit · x delete · q quit",
+            "↑/↓ select · space/enter toggle · a add · e edit · x delete · q quit",
             Style::default().fg(Color::DarkGray),
         )),
     };
@@ -548,6 +548,13 @@ mod tests {
     }
 
     #[test]
+    fn enter_toggles_selected_todo() {
+        let mut app = sample_app();
+        let uuid = app.todos[0].1.uuid;
+        assert_eq!(app.handle_key(Key::Enter), Action::Toggle(uuid));
+    }
+
+    #[test]
     fn add_mode_collects_input_and_confirms() {
         let mut app = sample_app();
         app.handle_key(Key::Char('a'));
@@ -569,7 +576,8 @@ mod tests {
         assert_eq!(app.input, "a");
         app.handle_key(Key::Esc);
         assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        let uuid = app.todos[0].1.uuid;
+        assert_eq!(app.handle_key(Key::Enter), Action::Toggle(uuid));
     }
 
     #[test]
