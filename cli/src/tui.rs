@@ -490,6 +490,25 @@ fn render_list(
     }
 }
 
+fn confirm_text(description: &str, max_width: usize) -> String {
+    let full = format!("Delete \"{description}\" permanently? (y/n)");
+    if full.chars().count() <= max_width {
+        return full;
+    }
+    let prefix = "Delete \"";
+    let suffix = "… \" permanently? (y/n)";
+    let keep = max_width.saturating_sub(prefix.chars().count() + suffix.chars().count());
+    if keep > 0 {
+        let trimmed: String = description.chars().take(keep).collect();
+        return format!("{prefix}{trimmed}{suffix}");
+    }
+    let fallback = "Delete permanently? (y/n)";
+    if fallback.chars().count() <= max_width {
+        return fallback.to_string();
+    }
+    "Delete? (y/n)".to_string()
+}
+
 fn render_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
     let Mode::ConfirmDelete(uuid) = &app.mode else {
         return;
@@ -500,18 +519,7 @@ fn render_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: 
         .find(|(_, t)| t.uuid == *uuid)
         .map(|(_, t)| t.description.as_str())
         .unwrap_or("");
-    let text = format!("Delete \"{description}\" permanently? (y/n)");
-
-    let max_width = area.width.saturating_sub(4) as usize;
-    let shown = if text.chars().count() > max_width && max_width > 0 {
-        let prefix = "Delete \"";
-        let keep = max_width.saturating_sub(prefix.chars().count() + "… \" perm.".chars().count());
-        let trimmed: String = description.chars().take(keep).collect();
-        format!("{prefix}{trimmed}… \" permanently? (y/n)")
-    } else {
-        text
-    };
-    let text = shown;
+    let text = confirm_text(description, area.width.saturating_sub(4) as usize);
 
     let box_width = (text.chars().count().max(20) as u16 + 4).min(area.width);
     let box_height = 3u16;
@@ -689,6 +697,31 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
         let app = App::new(Vec::new(), today);
         assert_eq!(selected_item_index(&app), None);
+    }
+
+    #[test]
+    fn confirm_text_fits_within_budget() {
+        let description = "d".repeat(200);
+        let text = confirm_text(&description, 40);
+        assert!(text.chars().count() <= 40, "text was {} chars", text.chars().count());
+        assert!(text.starts_with("Delete \""));
+        assert!(text.ends_with("… \" permanently? (y/n)"));
+    }
+
+    #[test]
+    fn confirm_text_short_description_untouched() {
+        let text = confirm_text("milk", 80);
+        assert_eq!(text, "Delete \"milk\" permanently? (y/n)");
+    }
+
+    #[test]
+    fn confirm_text_narrow_terminal_falls_back() {
+        let description = "d".repeat(200);
+        let text = confirm_text(&description, 30);
+        assert!(text.chars().count() <= 30);
+        assert!(text.contains("(y/n)"));
+        let text = confirm_text(&description, 12);
+        assert_eq!(text, "Delete? (y/n)");
     }
 
     #[test]
