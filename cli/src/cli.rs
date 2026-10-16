@@ -3,13 +3,12 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "todo",
-    about = "A small, local todo list",
-    version,
-    arg_required_else_help = true
+    about = "A small, local todo list\n\nRun without a subcommand to open the interactive mode",
+    version
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
