@@ -45,7 +45,7 @@ cargo build --release -p todo
 
 ```
 todo add "Buy milk" 1d      # add a todo due tomorrow
-todo list                   # show todos grouped by day
+todo list                   # show todos grouped by day (Overdue, Today, Tomorrow, …)
 todo list --all             # include completed todos from every day
 todo done 1                 # mark todo 1 as done
 todo undone 1               # mark todo 1 as not done
@@ -82,8 +82,15 @@ so an ID printed by either listing mode refers to the same todo in every command
 Because the default `todo list` hides todos completed before today, its output can
 contain gaps such as `2` and `4` — the missing IDs belong to hidden completed
 todos, which remain addressable with `todo list --all`. IDs are not persistent:
-adding, removing, completing, editing, or syncing todos can renumber them
-between invocations.
+adding, removing, editing, or syncing todos can renumber them
+between invocations. Completing a todo no longer renumbers anything:
+completed todos keep their position in the list and are shown dimmed and
+struck through.
+
+Todos are grouped by due date: `Overdue` (due before today, shown in red),
+`Today`, `Tomorrow`, and later dates. This applies to both the CLI list and
+the interactive TUI.
+
 
 ### Sync between machines
 

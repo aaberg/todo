@@ -3,9 +3,9 @@ use chrono::NaiveDate;
 use crate::event::Event;
 use crate::model::{Todo, group_name};
 
+
 const ORANGE: &str = "\x1b[38;2;255;165;0m";
 const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
 const BOLD: &str = "\x1b[1m";
 const STRIKETHROUGH: &str = "\x1b[9m";
 const DIM: &str = "\x1b[2m";
@@ -33,7 +33,9 @@ pub fn print_list(todos: &[(i64, Todo)], today: NaiveDate) {
 }
 
 fn print_group_heading(group: &str) {
-    if group == "Today" {
+    if group == "Overdue" {
+        println!("{RED}{BOLD}{group}{RESET}");
+    } else if group == "Today" {
         println!("{ORANGE}{BOLD}{group}{RESET}");
     } else {
         println!("{ORANGE}{group}{RESET}");
@@ -49,7 +51,7 @@ fn print_todo(id: i64, todo: &Todo, today: NaiveDate) {
     let text = format!("  [{state}] {id} {}", todo.description);
 
     if todo.completed_on.is_some() {
-        println!("{GREEN}{STRIKETHROUGH}{text}{RESET}");
+        println!("{DIM}{STRIKETHROUGH}{text}{RESET}");
     } else if todo.due_date < today {
         println!("{RED}{text}{RESET}");
     } else {
