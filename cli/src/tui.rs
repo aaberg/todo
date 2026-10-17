@@ -847,8 +847,8 @@ fn render_due_picker(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, ap
         })
         .max()
         .unwrap_or(0);
-    let box_width = ((content_width + 4) as u16).min(area.width).max(1);
-    let box_height = (rows.len() as u16 + 2).min(area.height).max(1);
+    let box_width = ((content_width + 4) as u16).max(1).min(area.width);
+    let box_height = (rows.len() as u16 + 2).max(1).min(area.height);
     let x = area.x + (area.width.saturating_sub(box_width)) / 2;
     let y = area.y + (area.height.saturating_sub(box_height)) / 2;
     let popup = ratatui::layout::Rect {
