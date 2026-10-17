@@ -22,7 +22,10 @@ pub async fn health() -> &'static str {
 /// Human-facing status page. Confirms the relay is up and reachable at this URL.
 pub async fn status_page(State(state): State<AppState>) -> Html<String> {
     let public_url = html_escape(state.config.public_url.as_str());
-    Html(STATUS_PAGE_HTML.replace("{{PUBLIC_URL}}", &public_url))
+    let html = STATUS_PAGE_HTML
+        .replace("{{PUBLIC_URL}}", &public_url)
+        .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
+    Html(html)
 }
 
 /// Escape text for safe interpolation into HTML content.
@@ -119,7 +122,7 @@ const STATUS_PAGE_HTML: &str = r##"<!DOCTYPE html>
     <h1><span class="dot"></span>todo relay</h1>
     <span class="status-badge">operational</span>
     <div class="url">{{PUBLIC_URL}}</div>
-    <footer>Sync relay for the local-first todo CLI. Serving — page reached, relay is up.</footer>
+    <footer>Sync relay for the local-first todo CLI. Relay is up and running.<br/>Version: {{VERSION}}</footer>
   </main>
 </body>
 </html>"##;
