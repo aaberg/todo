@@ -1,12 +1,12 @@
 use std::error::Error;
 use std::io::{self, IsTerminal, Stdout};
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap};
@@ -14,6 +14,7 @@ use ratatui::Terminal;
 use uuid::Uuid;
 
 use crate::db::Database;
+use crate::date::{format_date, parse_relative_due_date};
 use crate::display::print_list;
 use crate::event::{EventPayload, EventType};
 use crate::model::{fold_events, group_name, prepare_for_display, Todo};
@@ -27,6 +28,7 @@ pub enum Key {
     Char(char),
     Enter,
     Esc,
+    Tab,
     Up,
     Down,
     Backspace,
@@ -39,6 +41,7 @@ impl Key {
             KeyCode::Char(c) if event.modifiers == KeyModifiers::NONE || event.modifiers == KeyModifiers::SHIFT => Key::Char(c),
             KeyCode::Enter => Key::Enter,
             KeyCode::Esc => Key::Esc,
+            KeyCode::Tab => Key::Tab,
             KeyCode::Up => Key::Up,
             KeyCode::Down => Key::Down,
             KeyCode::Backspace => Key::Backspace,
@@ -47,10 +50,77 @@ impl Key {
     }
 }
 
+/// One of the due-date suggestions shown in the picker, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DueChoice {
+    Today,
+    Tomorrow,
+    InTwoDays,
+    NextMonday,
+    InOneWeek,
+    Other,
+}
+
+impl DueChoice {
+    const ALL: [DueChoice; 6] = [
+        DueChoice::Today,
+        DueChoice::Tomorrow,
+        DueChoice::InTwoDays,
+        DueChoice::NextMonday,
+        DueChoice::InOneWeek,
+        DueChoice::Other,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            DueChoice::Today => "Today",
+            DueChoice::Tomorrow => "Tomorrow",
+            DueChoice::InTwoDays => "In two days",
+            DueChoice::NextMonday => "On Monday",
+            DueChoice::InOneWeek => "In one week",
+            DueChoice::Other => "Other…",
+        }
+    }
+
+    /// Resolve to a concrete due date. Returns Err when the date arithmetic
+    /// would overflow NaiveDate; the caller keeps the picker open and shows
+    /// the error.
+    fn resolve(self, today: NaiveDate) -> Result<NaiveDate, Box<dyn Error>> {
+        let days = match self {
+            DueChoice::Today => 0,
+            DueChoice::Tomorrow => 1,
+            DueChoice::InTwoDays => 2,
+            DueChoice::NextMonday => 7 - today.weekday().num_days_from_monday() as i64,
+            DueChoice::InOneWeek => 7,
+            DueChoice::Other => return Err("choose a relative date like 1d or 7d".into()),
+        };
+        today
+            .checked_add_signed(chrono::TimeDelta::days(days))
+            .ok_or_else(|| "due date is out of range".into())
+    }
+
+    /// The gray secondary text shown on the right of each picker row.
+    fn hint(self, today: NaiveDate) -> String {
+        match self {
+            DueChoice::Other => "enter 1d, 7d, …".to_string(),
+            choice => match choice.resolve(today) {
+                Ok(date) => format_date(date),
+                Err(_) => "out of range".to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     Normal,
-    Add,
+    AddDescription,
+    ChooseDue,
+    CustomDue,
     Edit(Uuid),
     ConfirmDelete(Uuid),
 }
@@ -59,7 +129,7 @@ enum Mode {
 enum Action {
     None,
     Toggle(Uuid),
-    Add(String),
+    Add { description: String, due_date: NaiveDate },
     Edit(Uuid, String),
     Delete(Uuid),
     Quit,
@@ -72,6 +142,10 @@ pub struct App {
     selected_index: usize,
     mode: Mode,
     input: String,
+    /// Description captured when leaving AddDescription via Enter; restored when
+    /// returning from the picker. None in every other mode.
+    pending_description: Option<String>,
+    due_choice: DueChoice,
     message: String,
     quit: bool,
 }
@@ -84,10 +158,13 @@ impl App {
             selected_index: 0,
             mode: Mode::Normal,
             input: String::new(),
+            pending_description: None,
+            due_choice: DueChoice::Today,
             message: String::new(),
             quit: false,
         }
     }
+
 
     fn selected_uuid(&self) -> Option<Uuid> {
         self.todos.get(self.selected_index).map(|(_, t)| t.uuid)
@@ -110,16 +187,175 @@ impl App {
     fn handle_key(&mut self, key: Key) -> Action {
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
-            Mode::Add => self.handle_input_key(key),
+            Mode::AddDescription => self.handle_add_description_key(key),
+            Mode::ChooseDue => self.handle_choose_due_key(key),
+            Mode::CustomDue => self.handle_custom_due_key(key),
             Mode::Edit(uuid) => {
-                let action = self.handle_input_key(key);
-                if let Action::Add(text) = action {
-                    Action::Edit(uuid, text)
+                let action = self.handle_edit_input_key(key);
+                if let Action::Add { description, .. } = action {
+                    Action::Edit(uuid, description)
                 } else {
                     action
                 }
             }
             Mode::ConfirmDelete(uuid) => self.handle_confirm_key(key, uuid),
+        }
+    }
+
+    fn clear_add_state(&mut self) {
+        self.input.clear();
+        self.pending_description = None;
+        self.due_choice = DueChoice::Today;
+    }
+
+    /// Shared text editing for the add-description and edit modes. `Enter`
+    /// produces `Action::Add` carrying today's date; the caller decides what
+    /// to do with it (confirm the add, or rewrite it as an edit).
+    fn handle_text_input_key(&mut self, key: Key) -> Action {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Normal;
+                self.clear_add_state();
+                Action::None
+            }
+            Key::Enter => {
+                let text = self.input.trim().to_string();
+                self.mode = Mode::Normal;
+                self.clear_add_state();
+                if text.is_empty() {
+                    self.message = "Nothing entered.".to_string();
+                    Action::None
+                } else {
+                    Action::Add {
+                        description: text,
+                        due_date: self.today,
+                    }
+                }
+            }
+            Key::Backspace => {
+                self.input.pop();
+                Action::None
+            }
+            Key::Char(c) => {
+                self.input.push(c);
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_add_description_key(&mut self, key: Key) -> Action {
+        match key {
+            Key::Enter => {
+                let text = self.input.trim().to_string();
+                if text.is_empty() {
+                    self.message = "Nothing entered.".to_string();
+                    Action::None
+                } else {
+                    self.pending_description = Some(text);
+                    self.input.clear();
+                    self.due_choice = DueChoice::Today;
+                    self.mode = Mode::ChooseDue;
+                    Action::None
+                }
+            }
+            _ => self.handle_text_input_key(key),
+        }
+    }
+
+    fn handle_edit_input_key(&mut self, key: Key) -> Action {
+        match key {
+            // Tab has no meaning while editing; ignore it.
+            Key::Tab => Action::None,
+            _ => self.handle_text_input_key(key),
+        }
+    }
+
+    fn handle_choose_due_key(&mut self, key: Key) -> Action {
+        match key {
+            Key::Up => {
+                self.due_choice = DueChoice::ALL[self.due_choice.index().saturating_sub(1)];
+                Action::None
+            }
+            Key::Down => {
+                let next = (self.due_choice.index() + 1).min(DueChoice::ALL.len() - 1);
+                self.due_choice = DueChoice::ALL[next];
+                Action::None
+            }
+            Key::Enter => match self.due_choice {
+                DueChoice::Other => {
+                    self.input.clear();
+                    self.mode = Mode::CustomDue;
+                    Action::None
+                }
+                choice => match choice.resolve(self.today) {
+                    Ok(due_date) => {
+                        let Some(description) = self.pending_description.take() else {
+                            self.mode = Mode::Normal;
+                            self.clear_add_state();
+                            return Action::None;
+                        };
+                        self.mode = Mode::Normal;
+                        self.clear_add_state();
+                        Action::Add {
+                            description,
+                            due_date,
+                        }
+                    }
+                    Err(error) => {
+                        self.message = error.to_string();
+                        Action::None
+                    }
+                },
+            },
+            Key::Esc => {
+                self.mode = Mode::AddDescription;
+                self.input = self.pending_description.take().unwrap_or_default();
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_custom_due_key(&mut self, key: Key) -> Action {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::ChooseDue;
+                self.due_choice = DueChoice::Other;
+                self.input.clear();
+                Action::None
+            }
+            Key::Enter => {
+                let text = self.input.trim().to_string();
+                match parse_relative_due_date(&text, self.today) {
+                    Ok(due_date) => {
+                        let Some(description) = self.pending_description.take() else {
+                            self.mode = Mode::Normal;
+                            self.clear_add_state();
+                            return Action::None;
+                        };
+                        self.mode = Mode::Normal;
+                        self.clear_add_state();
+                        Action::Add {
+                            description,
+                            due_date,
+                        }
+                    }
+                    Err(error) => {
+                        self.message = error.to_string();
+                        Action::None
+                    }
+                }
+            }
+            Key::Backspace => {
+                self.input.pop();
+                Action::None
+            }
+            Key::Char(c) => {
+                self.input.push(c);
+                Action::None
+            }
+            _ => Action::None,
         }
     }
 
@@ -142,7 +378,7 @@ impl App {
                 None => Action::None,
             },
             Key::Char('a') => {
-                self.mode = Mode::Add;
+                self.mode = Mode::AddDescription;
                 self.input.clear();
                 Action::None
             }
@@ -170,36 +406,6 @@ impl App {
             Key::Char('q') | Key::Esc => {
                 self.quit = true;
                 Action::Quit
-            }
-            _ => Action::None,
-        }
-    }
-
-    fn handle_input_key(&mut self, key: Key) -> Action {
-        match key {
-            Key::Esc => {
-                self.mode = Mode::Normal;
-                self.input.clear();
-                Action::None
-            }
-            Key::Enter => {
-                let text = self.input.trim().to_string();
-                self.mode = Mode::Normal;
-                self.input.clear();
-                if text.is_empty() {
-                    self.message = "Nothing entered.".to_string();
-                    Action::None
-                } else {
-                    Action::Add(text)
-                }
-            }
-            Key::Backspace => {
-                self.input.pop();
-                Action::None
-            }
-            Key::Char(c) => {
-                self.input.push(c);
-                Action::None
             }
             _ => Action::None,
         }
@@ -240,13 +446,13 @@ fn apply_action(db: &mut Database, action: &Action, today: NaiveDate) -> Result<
                 },
             )?;
         }
-        Action::Add(description) => {
+        Action::Add { description, due_date } => {
             db.emit(
                 Uuid::new_v4(),
                 EventType::Create,
                 EventPayload::Create {
                     description: description.clone(),
-                    due_date: today,
+                    due_date: *due_date,
                 },
             )?;
         }
@@ -344,6 +550,12 @@ fn event_loop(
                 render_confirm(frame, area, app);
             } else {
                 render_list(frame, area, app, &mut list_state);
+                if matches!(app.mode, Mode::AddDescription) {
+                    render_add_input(frame, area, app);
+                }
+                if matches!(app.mode, Mode::ChooseDue) {
+                    render_due_picker(frame, area, app);
+                }
             }
         })?;
 
@@ -367,7 +579,7 @@ fn event_loop(
             let todos = fold_events(&db.all_events()?);
             app.todos = prepare_for_display(todos, today, false);
             match (&action, selected_uuid) {
-                (Action::Add(_), _) => {
+                (Action::Add { .. }, _) => {
                     app.message = "Added.".to_string();
                     app.reset_selection();
                 }
@@ -467,10 +679,19 @@ fn render_list(
     }
 
     let footer_text = match &app.mode {
-        Mode::Add => Line::from(vec![
-            Span::raw("Add: "),
+        Mode::AddDescription => Line::from(Span::styled(
+            "Enter choose due date · Esc cancel",
+            Style::default().fg(GRAY),
+        )),
+        Mode::ChooseDue => Line::from(Span::styled(
+            "↑/↓ select · Enter confirm · Esc back",
+            Style::default().fg(GRAY),
+        )),
+        Mode::CustomDue => Line::from(vec![
+            Span::raw("Due: "),
             Span::styled(app.input.clone(), Style::default().fg(ORANGE)),
-            Span::raw("_"),
+            Span::raw("_  "),
+            Span::styled("Examples: 1d, 7d · Esc back", Style::default().fg(GRAY)),
         ]),
         Mode::Edit(_) => Line::from(vec![
             Span::raw("Edit: "),
@@ -546,6 +767,105 @@ fn render_confirm(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: 
     frame.render_widget(paragraph, popup);
 }
 
+fn render_add_input(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    let input_display = if app.input.is_empty() {
+        " _ ".to_string()
+    } else {
+        format!(" {}_ ", app.input)
+    };
+    let content_width = input_display.chars().count().max(20);
+    let box_width = ((content_width + 4) as u16).min(area.width).max(10);
+    let box_height = 5u16.min(area.height).max(3);
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let popup = ratatui::layout::Rect {
+        x,
+        y,
+        width: box_width,
+        height: box_height,
+    };
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("New todo");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Vertically center the input text within the inner area.
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    let paragraph = Paragraph::new(Line::from(Span::styled(
+        input_display,
+        Style::default().fg(ORANGE),
+    )))
+    .alignment(Alignment::Left);
+    frame.render_widget(paragraph, chunks[1]);
+}
+
+fn render_due_picker(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    // Fixed-width label column so the date hints align vertically.
+    let label_width = DueChoice::ALL
+        .iter()
+        .map(|c| c.label().chars().count())
+        .max()
+        .unwrap_or(0);
+    let rows: Vec<Line> = DueChoice::ALL
+        .iter()
+        .map(|choice| {
+            let selected = *choice == app.due_choice;
+            let marker = if selected { ">" } else { " " };
+            let label_style = if selected {
+                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let hint_style = Style::default().fg(GRAY);
+            let label = choice.label();
+            let padding = label_width - label.chars().count();
+            let gap = "    ";
+            Line::from(vec![
+                Span::raw(format!("{marker} ")),
+                Span::styled(label.to_string(), label_style),
+                Span::raw(format!("{}{}", " ".repeat(padding), gap)),
+                Span::styled(choice.hint(app.today), hint_style),
+            ])
+        })
+        .collect();
+
+    let content_width = rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let box_width = ((content_width + 4) as u16).min(area.width).max(1);
+    let box_height = (rows.len() as u16 + 2).min(area.height).max(1);
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let popup = ratatui::layout::Rect {
+        x,
+        y,
+        width: box_width,
+        height: box_height,
+    };
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Due date");
+    let paragraph = Paragraph::new(rows).block(block);
+    frame.render_widget(paragraph, popup);
+}
+
 fn todo_style(todo: &Todo, today: NaiveDate) -> Style {
     if todo.completed_on.is_some() {
         Style::default().fg(GRAY).add_modifier(Modifier::CROSSED_OUT)
@@ -608,15 +928,17 @@ mod tests {
     }
 
     #[test]
-    fn add_mode_collects_input_and_confirms() {
+    fn add_mode_collects_input_and_opens_due_picker_on_enter() {
         let mut app = sample_app();
         app.handle_key(Key::Char('a'));
         for c in "buy milk".chars() {
             app.handle_key(Key::Char(c));
         }
         assert_eq!(app.input, "buy milk");
-        assert_eq!(app.handle_key(Key::Enter), Action::Add("buy milk".to_string()));
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        assert_eq!(app.mode, Mode::ChooseDue);
+        assert_eq!(app.pending_description.as_deref(), Some("buy milk"));
+        assert!(app.input.is_empty());
     }
 
     #[test]
@@ -743,5 +1065,288 @@ mod tests {
         assert_eq!(app.selected_index, 0);
         app.select_uuid(Uuid::new_v4());
         assert_eq!(app.selected_index, 0);
+    }
+
+    fn app_entering_add(today: NaiveDate) -> App {
+        let mut app = App::new(Vec::new(), today);
+        app.handle_key(Key::Char('a'));
+        app
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(Key::Char(c));
+        }
+    }
+
+    #[test]
+    fn enter_after_description_opens_picker_defaulting_to_today() {
+        let mut app = sample_app();
+        let today = app.today;
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "buy milk");
+        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        assert_eq!(app.mode, Mode::ChooseDue);
+        assert_eq!(app.due_choice, DueChoice::Today);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Action::Add {
+                description: "buy milk".to_string(),
+                due_date: today,
+            }
+        );
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn enter_opens_picker_and_preserves_description() {
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "  buy milk  ");
+        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        assert_eq!(app.mode, Mode::ChooseDue);
+        assert_eq!(app.pending_description.as_deref(), Some("buy milk"));
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn enter_with_empty_description_stays_in_add() {
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        assert_eq!(app.mode, Mode::AddDescription);
+        assert_eq!(app.pending_description, None);
+        assert_eq!(app.message, "Nothing entered.");
+
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "   ");
+        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        assert_eq!(app.mode, Mode::AddDescription);
+    }
+
+    #[test]
+    fn picker_defaults_to_today_and_navigation_is_bounded() {
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "buy milk");
+        app.handle_key(Key::Enter);
+        assert_eq!(app.due_choice, DueChoice::Today);
+
+        app.handle_key(Key::Up);
+        assert_eq!(app.due_choice, DueChoice::Today);
+
+        app.handle_key(Key::Down);
+        assert_eq!(app.due_choice, DueChoice::Tomorrow);
+        app.handle_key(Key::Down);
+        assert_eq!(app.due_choice, DueChoice::InTwoDays);
+        app.handle_key(Key::Down);
+        assert_eq!(app.due_choice, DueChoice::NextMonday);
+        app.handle_key(Key::Down);
+        assert_eq!(app.due_choice, DueChoice::InOneWeek);
+        app.handle_key(Key::Down);
+        assert_eq!(app.due_choice, DueChoice::Other);
+        app.handle_key(Key::Down);
+        assert_eq!(app.due_choice, DueChoice::Other);
+
+        app.handle_key(Key::Up);
+        assert_eq!(app.due_choice, DueChoice::InOneWeek);
+    }
+
+    #[test]
+    fn concrete_choices_resolve_to_offsets_0_1_2() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        assert_eq!(DueChoice::Today.resolve(today).unwrap(), today);
+        assert_eq!(
+            DueChoice::Tomorrow.resolve(today).unwrap(),
+            today + chrono::TimeDelta::days(1)
+        );
+        assert_eq!(
+            DueChoice::InTwoDays.resolve(today).unwrap(),
+            today + chrono::TimeDelta::days(2)
+        );
+        assert_eq!(
+            DueChoice::InOneWeek.resolve(today).unwrap(),
+            today + chrono::TimeDelta::days(7)
+        );
+    }
+
+    #[test]
+    fn next_monday_is_strictly_in_the_future() {
+        // 2026-10-17 is a Saturday, 2026-10-18 a Sunday, 2026-10-19 a Monday.
+        let saturday = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        let sunday = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let tuesday = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+
+        assert_eq!(
+            DueChoice::NextMonday.resolve(saturday).unwrap(),
+            monday,
+            "Saturday -> Monday two days later"
+        );
+        assert_eq!(
+            DueChoice::NextMonday.resolve(sunday).unwrap(),
+            monday,
+            "Sunday -> Monday one day later"
+        );
+        assert_eq!(
+            DueChoice::NextMonday.resolve(monday).unwrap(),
+            monday + chrono::TimeDelta::days(7),
+            "Monday -> next Monday seven days later"
+        );
+        assert_eq!(
+            DueChoice::NextMonday.resolve(tuesday).unwrap(),
+            monday + chrono::TimeDelta::days(7),
+            "Tuesday -> next Monday"
+        );
+    }
+
+    #[test]
+    fn duplicate_dates_keep_both_choices() {
+        // Saturday: In two days and On Monday both resolve to Monday.
+        let saturday = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        assert_eq!(
+            DueChoice::InTwoDays.resolve(saturday).unwrap(),
+            DueChoice::NextMonday.resolve(saturday).unwrap()
+        );
+        assert_eq!(DueChoice::ALL.len(), 6);
+    }
+
+    #[test]
+    fn picker_enter_adds_with_selected_due_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        let mut app = app_entering_add(today);
+        type_text(&mut app, "buy milk");
+        app.handle_key(Key::Enter);
+
+        app.handle_key(Key::Down);
+        assert_eq!(
+            app.handle_key(Key::Enter),
+            Action::Add {
+                description: "buy milk".to_string(),
+                due_date: today + chrono::TimeDelta::days(1),
+            }
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.pending_description, None);
+    }
+
+    #[test]
+    fn esc_from_picker_restores_description_input() {
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "buy milk");
+        app.handle_key(Key::Enter);
+        app.handle_key(Key::Down);
+        assert_eq!(app.handle_key(Key::Esc), Action::None);
+        assert_eq!(app.mode, Mode::AddDescription);
+        assert_eq!(app.input, "buy milk");
+        assert_eq!(app.pending_description, None);
+    }
+
+    #[test]
+    fn other_opens_custom_input() {
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "buy milk");
+        app.handle_key(Key::Enter);
+        for _ in 0..5 {
+            app.handle_key(Key::Down);
+        }
+        assert_eq!(app.due_choice, DueChoice::Other);
+        assert_eq!(app.handle_key(Key::Enter), Action::None);
+        assert_eq!(app.mode, Mode::CustomDue);
+        assert_eq!(app.pending_description.as_deref(), Some("buy milk"));
+    }
+
+    #[test]
+    fn custom_input_valid_values_add_with_expected_due_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        for (input, offset) in [("1d", 1), ("7d", 7)] {
+            let mut app = app_entering_add(today);
+            type_text(&mut app, "buy milk");
+            app.handle_key(Key::Enter);
+            for _ in 0..5 {
+                app.handle_key(Key::Down);
+            }
+            app.handle_key(Key::Enter);
+            type_text(&mut app, input);
+            assert_eq!(
+                app.handle_key(Key::Enter),
+                Action::Add {
+                    description: "buy milk".to_string(),
+                    due_date: today + chrono::TimeDelta::days(offset),
+                }
+            );
+            assert_eq!(app.mode, Mode::Normal);
+        }
+    }
+
+    #[test]
+    fn custom_input_invalid_values_stay_and_show_error() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        for input in ["tomorrow", "-1d", ""] {
+            let mut app = app_entering_add(today);
+            type_text(&mut app, "buy milk");
+            app.handle_key(Key::Enter);
+            for _ in 0..5 {
+                app.handle_key(Key::Down);
+            }
+            app.handle_key(Key::Enter);
+            type_text(&mut app, input);
+            assert_eq!(app.handle_key(Key::Enter), Action::None);
+            assert_eq!(app.mode, Mode::CustomDue);
+            assert_eq!(app.pending_description.as_deref(), Some("buy milk"));
+            assert_eq!(app.input, input);
+            assert!(!app.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn esc_from_custom_input_returns_to_picker_with_other_selected() {
+        let mut app = sample_app();
+        app.handle_key(Key::Char('a'));
+        type_text(&mut app, "buy milk");
+        app.handle_key(Key::Enter);
+        for _ in 0..5 {
+            app.handle_key(Key::Down);
+        }
+        app.handle_key(Key::Enter);
+        type_text(&mut app, "7d");
+        assert_eq!(app.handle_key(Key::Esc), Action::None);
+        assert_eq!(app.mode, Mode::ChooseDue);
+        assert_eq!(app.due_choice, DueChoice::Other);
+        assert_eq!(app.pending_description.as_deref(), Some("buy milk"));
+    }
+
+    #[test]
+    fn applying_add_action_persists_selected_due_date() {
+        let mut db = Database::open_in_memory().unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        let due_date = today + chrono::TimeDelta::days(7);
+        apply_action(
+            &mut db,
+            &Action::Add {
+                description: "buy milk".to_string(),
+                due_date,
+            },
+            today,
+        )
+        .unwrap();
+        let todos = fold_events(&db.all_events().unwrap());
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].description, "buy milk");
+        assert_eq!(todos[0].due_date, due_date);
+    }
+
+    #[test]
+    fn picker_hints_show_resolved_dates() {
+        let saturday = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        assert_eq!(DueChoice::Today.hint(saturday), "Oct 17th, 2026");
+        assert_eq!(DueChoice::Tomorrow.hint(saturday), "Oct 18th, 2026");
+        assert_eq!(DueChoice::InTwoDays.hint(saturday), "Oct 19th, 2026");
+        assert_eq!(DueChoice::NextMonday.hint(saturday), "Oct 19th, 2026");
+        assert_eq!(DueChoice::InOneWeek.hint(saturday), "Oct 24th, 2026");
+        assert_eq!(DueChoice::Other.hint(saturday), "enter 1d, 7d, …");
     }
 }
