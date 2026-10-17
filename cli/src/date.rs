@@ -12,8 +12,9 @@ pub fn parse_relative_due_date(value: &str, today: NaiveDate) -> Result<NaiveDat
         return Err("due date cannot be negative".into());
     }
 
+    let delta = chrono::TimeDelta::try_days(days).ok_or("due date is out of range")?;
     today
-        .checked_add_signed(chrono::TimeDelta::days(days))
+        .checked_add_signed(delta)
         .ok_or_else(|| "due date is out of range".into())
 }
 
@@ -51,6 +52,7 @@ mod tests {
         assert_eq!(parse_relative_due_date("0d", today).unwrap(), today);
         assert!(parse_relative_due_date("tomorrow", today).is_err());
         assert!(parse_relative_due_date("-1d", today).is_err());
+        assert!(parse_relative_due_date("9223372036854775807d", today).is_err());
     }
 
     #[test]

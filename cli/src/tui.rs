@@ -774,8 +774,8 @@ fn render_add_input(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app
         format!(" {}_ ", app.input)
     };
     let content_width = input_display.chars().count().max(20);
-    let box_width = ((content_width + 4) as u16).min(area.width).max(10);
-    let box_height = 5u16.min(area.height).max(3);
+    let box_width = ((content_width + 4) as u16).max(10).min(area.width);
+    let box_height = 5u16.max(3).min(area.height);
     let x = area.x + (area.width.saturating_sub(box_width)) / 2;
     let y = area.y + (area.height.saturating_sub(box_height)) / 2;
     let popup = ratatui::layout::Rect {
