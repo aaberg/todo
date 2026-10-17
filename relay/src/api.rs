@@ -122,7 +122,7 @@ const STATUS_PAGE_HTML: &str = r##"<!DOCTYPE html>
     <h1><span class="dot"></span>todo relay</h1>
     <span class="status-badge">operational</span>
     <div class="url">{{PUBLIC_URL}}</div>
-    <footer>Sync relay for the local-first todo CLI, version {{VERSION}}. Serving — page reached, relay is up.</footer>
+    <footer>Sync relay for the local-first todo CLI. Relay is up and running.<br/>Version: {{VERSION}}</footer>
   </main>
 </body>
 </html>"##;
