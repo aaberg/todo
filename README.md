@@ -67,7 +67,11 @@ Key bindings:
 
 - `↑`/`↓` — move selection
 - `space` or `Enter` — mark the selected todo as done (or undone)
-- `a` — add a new todo (due today; type the description, press `Enter`)
+- `a` — add a new todo: type the description, then:
+  - `Enter` — open a due-date picker (Today, Tomorrow, In two days, On Monday,
+    In one week, or Other… for a relative date like `1d` or `7d`); navigate
+    with `↑`/`↓`, confirm with `Enter`, go back with `Esc`
+  - `Esc` — cancel
 - `e` — edit the selected todo's description
 - `x` — delete the selected todo (asks for confirmation, `y`/`n`)
 - `q` or `Esc` — quit and print the final list

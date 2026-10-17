@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, NaiveDate, Utc};
 use uuid::Uuid;
 
+use crate::date::format_date;
 use crate::event::{Event, EventPayload, EventType};
 
 /// A todo as materialized from the event log.
@@ -118,7 +119,7 @@ pub fn group_name(todo: &Todo, today: NaiveDate) -> String {
     } else if todo.due_date == today.succ_opt().expect("valid tomorrow") {
         "Tomorrow".to_owned()
     } else {
-        todo.due_date.format("%Y-%m-%d").to_string()
+        format_date(todo.due_date)
     }
 }
 
@@ -494,6 +495,19 @@ mod tests {
         };
         assert_eq!(group_name(&todo, today), "Overdue");
         assert_eq!(group_order(&todo, today), 0);
+    }
+
+    #[test]
+    fn future_date_group_uses_formatted_date() {
+        let today = date("2026-08-11");
+        let todo = Todo {
+            uuid: Uuid::new_v4(),
+            description: "future".to_owned(),
+            due_date: date("2026-08-15"),
+            completed_on: None,
+            created_at: Utc::now(),
+        };
+        assert_eq!(group_name(&todo, today), "Aug 15th, 2026");
     }
 
     #[test]
