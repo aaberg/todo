@@ -545,7 +545,15 @@ fn check_session(config: &Config) -> SessionStatus {
 fn spawn_session_checker(
     config: Config,
 ) -> (Arc<Mutex<SessionStatus>>, thread::JoinHandle<()>) {
-    let status = Arc::new(Mutex::new(SessionStatus::Checking));
+    // Initialize from the auth requirement so logged-out sessions render
+    // `Not logged in` immediately instead of flashing `Checking session…`
+    // until the worker thread reaches the same check.
+    let initial = if config.require_auth().is_ok() {
+        SessionStatus::Checking
+    } else {
+        SessionStatus::NotLoggedIn
+    };
+    let status = Arc::new(Mutex::new(initial));
     let worker_status = Arc::clone(&status);
     let handle = thread::spawn(move || {
         // Assume logged-out when credentials are absent and stop probing.
