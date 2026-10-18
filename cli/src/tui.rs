@@ -821,10 +821,7 @@ fn session_line(app: &App) -> Line<'static> {
                 Span::styled("online", Style::default().fg(GREEN)),
             ])
         }
-        SessionStatus::Offline => Line::from(vec![
-            Span::styled("Logged in - ", Style::default().fg(GRAY)),
-            Span::styled("offline", Style::default().fg(RED)),
-        ]),
+        SessionStatus::Offline => Line::from(Span::styled("offline", Style::default().fg(RED))),
     }
 }
 
@@ -1487,7 +1484,7 @@ mod tests {
         let mut app = App::new(Vec::new(), NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
         app.session_status = SessionStatus::Offline;
         let line = session_line(&app);
-        assert_eq!(line_text(&line), "Logged in - offline");
+        assert_eq!(line_text(&line), "offline");
         let colors = line_span_styles(&line);
         assert_eq!(colors[colors.len() - 1], Some(RED));
     }
