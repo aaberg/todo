@@ -18,7 +18,6 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::db::Database;
 use crate::date::{format_date, parse_relative_due_date};
-use crate::display::print_list;
 use crate::event::{EventPayload, EventType};
 use crate::model::{fold_events, group_name, prepare_for_display, Todo};
 
@@ -610,9 +609,6 @@ pub fn run(db: &mut Database, today: NaiveDate) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let todos = fold_events(&db.all_events()?);
-    let display = prepare_for_display(todos, today, false);
-    print_list(&display, today);
     Ok(())
 }
 
