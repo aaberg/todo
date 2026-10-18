@@ -3,7 +3,7 @@ members = ["cli", "common", "relay"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
