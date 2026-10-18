@@ -480,7 +480,19 @@ pub fn logout(config: &mut Config) -> Result<(), SyncError> {
 /// Query /me and return the user info.
 pub fn whoami(config: &Config) -> Result<MeResponse, SyncError> {
     let (relay_url, token) = config.require_auth().map_err(SyncError::Config)?;
-    let client = reqwest::blocking::Client::new();
+    whoami_with_url_and_token(relay_url, token)
+}
+
+/// Query /me with an explicit relay URL and token, using a short timeout so
+/// callers probing connectivity (e.g. the TUI status line) stay responsive.
+pub fn whoami_with_url_and_token(
+    relay_url: &str,
+    token: &str,
+) -> Result<MeResponse, SyncError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(SyncError::Http)?;
     let me_url = format!("{}/me", relay_url.trim_end_matches('/'));
     let resp = client
         .get(&me_url)
