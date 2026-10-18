@@ -27,7 +27,7 @@ const GREEN: Color = Color::Green;
 const GRAY: Color = Color::DarkGray;
 
 /// How often the background thread re-checks the session against the relay.
-const SESSION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const SESSION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatus {
