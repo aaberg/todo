@@ -1,5 +1,7 @@
 use std::error::Error;
 use std::io::{self, IsTerminal, Stdout};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use chrono::{Datelike, NaiveDate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -13,15 +15,31 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use uuid::Uuid;
 
+use crate::config::Config;
 use crate::db::Database;
 use crate::date::{format_date, parse_relative_due_date};
-use crate::display::print_list;
 use crate::event::{EventPayload, EventType};
 use crate::model::{fold_events, group_name, prepare_for_display, Todo};
 
 const ORANGE: Color = Color::Rgb(255, 165, 0);
 const RED: Color = Color::Red;
+const GREEN: Color = Color::Green;
 const GRAY: Color = Color::DarkGray;
+
+/// How often the background thread re-checks the session against the relay.
+const SESSION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStatus {
+    /// No credentials in config — never contact the relay.
+    NotLoggedIn,
+    /// A `/me` request is still in flight.
+    Checking,
+    /// `/me` succeeded; the user is authenticated.
+    Online { email: Option<String> },
+    /// `/me` failed (network down or relay unreachable) while logged in.
+    Offline,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -148,6 +166,7 @@ pub struct App {
     due_choice: DueChoice,
     message: String,
     quit: bool,
+    session_status: SessionStatus,
 }
 
 impl App {
@@ -162,6 +181,7 @@ impl App {
             due_choice: DueChoice::Today,
             message: String::new(),
             quit: false,
+            session_status: SessionStatus::NotLoggedIn,
         }
     }
 
@@ -506,6 +526,55 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Probe the session state against the relay. Only HTTP-level errors count as
+/// offline; the `/me` call uses a short timeout so checks feel responsive.
+fn check_session(config: &Config) -> SessionStatus {
+    let Ok((relay_url, token)) = config.require_auth() else {
+        return SessionStatus::NotLoggedIn;
+    };
+    match crate::sync::whoami_with_url_and_token(relay_url, token) {
+        Ok(me) => SessionStatus::Online { email: me.email },
+        Err(_) => SessionStatus::Offline,
+    }
+}
+
+/// Spawn a background thread that checks the session against the relay at
+/// startup and then periodically. The latest result is shared through an
+/// `Arc<Mutex>` that the event loop polls on every redraw.
+fn spawn_session_checker(
+    config: Config,
+) -> (Arc<Mutex<SessionStatus>>, thread::JoinHandle<()>) {
+    // Initialize from the auth requirement so logged-out sessions render
+    // `Not logged in` immediately instead of flashing `Checking session…`
+    // until the worker thread reaches the same check.
+    let initial = if config.require_auth().is_ok() {
+        SessionStatus::Checking
+    } else {
+        SessionStatus::NotLoggedIn
+    };
+    let status = Arc::new(Mutex::new(initial));
+    let worker_status = Arc::clone(&status);
+    let handle = thread::spawn(move || {
+        // Assume logged-out when credentials are absent and stop probing.
+        if config.require_auth().is_err() {
+            *worker_status.lock().unwrap() = SessionStatus::NotLoggedIn;
+            return;
+        }
+        loop {
+            let next = check_session(&config);
+            *worker_status.lock().unwrap() = next;
+            thread::sleep(SESSION_CHECK_INTERVAL);
+        }
+    });
+    (status, handle)
+}
+
+/// Query the relay once, synchronously. Used before the final sync on quit:
+/// the sync only runs when the user is logged in and the machine is online.
+fn is_logged_in_and_online(config: &Config) -> bool {
+    matches!(check_session(config), SessionStatus::Online { .. })
+}
+
 pub fn run(db: &mut Database, today: NaiveDate) -> Result<(), Box<dyn Error>> {
     if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
         return Err("interactive mode requires a terminal".into());
@@ -514,6 +583,8 @@ pub fn run(db: &mut Database, today: NaiveDate) -> Result<(), Box<dyn Error>> {
     let display = prepare_for_display(todos, today, false);
     let mut app = App::new(display, today);
 
+    let (session_status, _session_thread) = spawn_session_checker(Config::load());
+
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
@@ -521,13 +592,23 @@ pub fn run(db: &mut Database, today: NaiveDate) -> Result<(), Box<dyn Error>> {
         previous_hook(info);
     }));
 
-    let result = event_loop(&mut app, db, today);
+    let result = event_loop(&mut app, db, today, &session_status);
 
     result?;
 
-    let todos = fold_events(&db.all_events()?);
-    let display = prepare_for_display(todos, today, false);
-    print_list(&display, today);
+    // If the user is logged in and the machine is online, run a final sync
+    // so work done in the TUI reaches the relay before quitting.
+    let config = Config::load();
+    if is_logged_in_and_online(&config) {
+        match crate::sync::sync(db, &config) {
+            Ok(stats) => println!(
+                "Synced: pulled {} event(s), pushed {} event(s).",
+                stats.pulled, stats.pushed
+            ),
+            Err(error) => eprintln!("Final sync failed: {error}"),
+        }
+    }
+
     Ok(())
 }
 
@@ -535,6 +616,7 @@ fn event_loop(
     app: &mut App,
     db: &mut Database,
     today: NaiveDate,
+    session_status: &Arc<Mutex<SessionStatus>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut guard = TerminalGuard::new()?;
     let mut list_state = ListState::default();
@@ -542,6 +624,9 @@ fn event_loop(
     loop {
         let selected_uuid = app.selected_uuid();
         list_state.select(selected_item_index(app));
+        if let Ok(status) = session_status.lock() {
+            app.session_status = status.clone();
+        }
 
         let terminal = &mut guard.terminal;
         terminal.draw(|frame| {
@@ -628,6 +713,7 @@ fn render_list(
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(area);
 
@@ -704,6 +790,7 @@ fn render_list(
         )),
     };
     frame.render_widget(Paragraph::new(footer_text), chunks[1]);
+    frame.render_widget(Paragraph::new(session_line(app)), chunks[2]);
 
     if !app.message.is_empty() {
         frame.render_widget(
@@ -711,8 +798,30 @@ fn render_list(
                 app.message.clone(),
                 Style::default().fg(Color::DarkGray),
             )),
-            chunks[2],
+            chunks[3],
         );
+    }
+}
+
+/// The logged-in / online status line shown below the instructions.
+fn session_line(app: &App) -> Line<'static> {
+    match &app.session_status {
+        SessionStatus::NotLoggedIn => Line::from(Span::styled(
+            "Not logged in",
+            Style::default().fg(GRAY),
+        )),
+        SessionStatus::Checking => Line::from(Span::styled(
+            "Checking session…",
+            Style::default().fg(GRAY),
+        )),
+        SessionStatus::Online { email } => {
+            let name = email.clone().unwrap_or_else(|| "unknown".to_string());
+            Line::from(vec![
+                Span::styled(format!("Logged in as {name} - "), Style::default().fg(GRAY)),
+                Span::styled("online", Style::default().fg(GREEN)),
+            ])
+        }
+        SessionStatus::Offline => Line::from(Span::styled("offline", Style::default().fg(RED))),
     }
 }
 
@@ -1348,5 +1457,42 @@ mod tests {
         assert_eq!(DueChoice::NextMonday.hint(saturday), "Oct 19th, 2026");
         assert_eq!(DueChoice::InOneWeek.hint(saturday), "Oct 24th, 2026");
         assert_eq!(DueChoice::Other.hint(saturday), "enter 1d, 7d, …");
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn line_span_styles(line: &Line) -> Vec<Option<Color>> {
+        line.spans.iter().map(|s| s.style.fg).collect()
+    }
+
+    #[test]
+    fn session_line_shows_email_and_online_in_green() {
+        let mut app = App::new(Vec::new(), NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+        app.session_status = SessionStatus::Online {
+            email: Some("john@doe.com".to_string()),
+        };
+        let line = session_line(&app);
+        assert_eq!(line_text(&line), "Logged in as john@doe.com - online");
+        let colors = line_span_styles(&line);
+        assert_eq!(colors[colors.len() - 1], Some(GREEN));
+    }
+
+    #[test]
+    fn session_line_shows_offline_in_red() {
+        let mut app = App::new(Vec::new(), NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+        app.session_status = SessionStatus::Offline;
+        let line = session_line(&app);
+        assert_eq!(line_text(&line), "offline");
+        let colors = line_span_styles(&line);
+        assert_eq!(colors[colors.len() - 1], Some(RED));
+    }
+
+    #[test]
+    fn session_line_shows_not_logged_in() {
+        let app = App::new(Vec::new(), NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+        let line = session_line(&app);
+        assert_eq!(line_text(&line), "Not logged in");
     }
 }

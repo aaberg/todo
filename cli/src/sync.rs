@@ -481,6 +481,28 @@ pub fn logout(config: &mut Config) -> Result<(), SyncError> {
 pub fn whoami(config: &Config) -> Result<MeResponse, SyncError> {
     let (relay_url, token) = config.require_auth().map_err(SyncError::Config)?;
     let client = reqwest::blocking::Client::new();
+    me_request(&client, relay_url, token)
+}
+
+/// Query /me with an explicit relay URL and token, using a short timeout so
+/// callers probing connectivity (e.g. the TUI status line) stay responsive.
+/// This deliberately does not alter `whoami`, which keeps its unbounded client.
+pub fn whoami_with_url_and_token(
+    relay_url: &str,
+    token: &str,
+) -> Result<MeResponse, SyncError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(SyncError::Http)?;
+    me_request(&client, relay_url, token)
+}
+
+fn me_request(
+    client: &reqwest::blocking::Client,
+    relay_url: &str,
+    token: &str,
+) -> Result<MeResponse, SyncError> {
     let me_url = format!("{}/me", relay_url.trim_end_matches('/'));
     let resp = client
         .get(&me_url)
