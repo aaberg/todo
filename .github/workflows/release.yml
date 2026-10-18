@@ -207,7 +207,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           fingerprint: ${{ secrets.SSH_FINGERPRINT }}
           script: |
-            cd "$RELAY_LOCATION"
+            cd /opt/todo-relay/
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
