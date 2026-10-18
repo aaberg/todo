@@ -207,7 +207,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           fingerprint: ${{ secrets.SSH_FINGERPRINT }}
           script: |
-            cd ${{env.RELAY_LOCATION}}
+            cd "$RELAY_LOCATION"
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
