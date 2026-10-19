@@ -67,7 +67,7 @@ jobs:
           shasum -a 256 todo-${{ env.TARGET }}.tar.gz todo-relay-${{ env.TARGET }}.tar.gz > SHA256SUMS-linux
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             todo-${{ env.TARGET }}.tar.gz
@@ -117,7 +117,7 @@ jobs:
           shasum -a 256 todo-universal-apple-darwin.tar.gz todo-relay-universal-apple-darwin.tar.gz > SHA256SUMS-macos
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             todo-universal-apple-darwin.tar.gz
@@ -156,7 +156,7 @@ jobs:
           "{0}  {1}" -f (Get-FileHash todo-relay-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower(), "todo-relay-x86_64-pc-windows-msvc.zip" | Out-File -Append -Encoding utf8 SHA256SUMS-windows.txt
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             todo-x86_64-pc-windows-msvc.zip
@@ -200,7 +200,7 @@ jobs:
     environment: Production
     steps:
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.5
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST }}
           username: deployuser
