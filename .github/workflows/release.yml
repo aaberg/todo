@@ -205,7 +205,6 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: deployuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
           script: |
             cd /opt/todo-relay/
             docker compose pull
