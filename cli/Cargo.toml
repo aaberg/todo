@@ -16,4 +16,4 @@ open = "5"
 toml = "0.8"
 url = { workspace = true }
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
